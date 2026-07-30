@@ -13,6 +13,15 @@
     -> train rvc / RVC 后处理
 ```
 
+快速导航：
+
+- [预检与初始化](#0-预检)
+- [导入与拆分](#2-导入媒体)
+- [Gemini 标注与人工复核](#4-gemini-标注与聚类)
+- [导出与训练](#6-导出训练集)
+- [成本与副作用](#成本与副作用边界)
+- [完整命令参考](#完整命令参考)
+
 命令示例表达的是稳定的工作流概念。不同版本的参数细节以 `voice-dataset <子命令> --help` 为准。
 
 ## 0. 预检
@@ -28,6 +37,8 @@ voice-dataset label --help
 voice-dataset review --help
 voice-dataset export --help
 voice-dataset train --help
+voice-dataset status --help
+python .\scripts\generate_configs.py --help
 ffmpeg -version
 ```
 
@@ -277,3 +288,602 @@ voice-dataset train $workspace rvc --execute
 | `train ... --execute` | 取决于上游 | 是 | 外部实验与模型产物 |
 
 任何高成本行为都必须来自清楚、独立的用户命令。检查状态和打开 TUI 不会隐式触发 Gemini 或训练；重新生成训练计划会重复预检，但不会启动模型训练。
+
+## 完整命令参考
+
+以下命令均以 Windows PowerShell 为例。路径含空格时必须使用引号。建议先定义变量，
+减少复制时改错角色工作区的风险：
+
+```powershell
+$repo = 'D:\voice-dataset-pipeline'
+$workspace = 'D:\voice-workspaces\character-a'
+$inputPath = 'D:\media\character-a'
+$exportPath = 'D:\voice-datasets\character-a'
+
+Set-Location $repo
+```
+
+### 查看版本与帮助
+
+```powershell
+voice-dataset --version
+voice-dataset --help
+voice-dataset <子命令> --help
+```
+
+可用子命令：
+
+```text
+init  ingest  split  label  review  export  train  status
+```
+
+`--help`、`--version` 不写入工作区，不调用网络，也不会启动训练。
+
+### 生成项目配置与敏感配置
+
+完整语法：
+
+```powershell
+python .\scripts\generate_configs.py `
+  [目标工作区] `
+  [--overwrite-project] `
+  [--overwrite-secrets]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `目标工作区` | 可省略；省略时使用当前目录 |
+| `--overwrite-project` | 用默认模板覆盖 `config/pipeline.toml` |
+| `--overwrite-secrets` | 用空白模板覆盖敏感配置，会清除已填写的 Token |
+
+安全生成：
+
+```powershell
+python .\scripts\generate_configs.py $workspace
+```
+
+只重置非敏感项目配置：
+
+```powershell
+python .\scripts\generate_configs.py $workspace --overwrite-project
+```
+
+同时重置两类配置：
+
+```powershell
+# 警告：会把 credentials.toml 重置为空白模板。
+python .\scripts\generate_configs.py `
+  $workspace `
+  --overwrite-project `
+  --overwrite-secrets
+```
+
+生成产物：
+
+```text
+<workspace>\config\pipeline.toml
+<workspace>\secrets\.gitignore
+<workspace>\secrets\credentials.toml
+```
+
+脚本默认保留已有文件。敏感目录的 `.gitignore` 必须且只能保留 `*` 和
+`!.gitignore` 两条有效规则，防止后续规则意外重新纳入凭据。
+
+### `init`：初始化工作区
+
+完整语法：
+
+```powershell
+voice-dataset init `
+  <workspace> `
+  [--config <project-config.toml>] `
+  [--overwrite-config] `
+  [--overwrite-secrets]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `workspace` | 必填；角色工作区根目录 |
+| `--config` | 从指定的非敏感 TOML 初始化项目配置 |
+| `--overwrite-config` | 覆盖现有项目配置 |
+| `--overwrite-secrets` | 将敏感配置重置为空白模板，会清除已填写的 Token |
+
+使用仓库项目模板：
+
+```powershell
+voice-dataset init `
+  $workspace `
+  --config '.\examples\project\pipeline.toml'
+```
+
+使用内置默认配置：
+
+```powershell
+voice-dataset init $workspace
+```
+
+明确重置项目配置：
+
+```powershell
+voice-dataset init $workspace --overwrite-config
+```
+
+`init` 创建工作区骨架以及相互独立的 `config/`、`secrets/`。如果只存在旧版
+`<workspace>\pipeline.toml`，再次运行 `init` 会校验并复制到
+`<workspace>\config\pipeline.toml`，不会删除旧文件。
+
+### `ingest`：递归导入音视频
+
+完整语法：
+
+```powershell
+voice-dataset ingest `
+  <workspace> `
+  <input> [<input> ...] `
+  [--config <project-config.toml>] `
+  [--mode auto|audio|video]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `workspace` | 目标工作区 |
+| `inputs` | 一个或多个文件、目录；目录会递归扫描 |
+| `--config` | 覆盖默认项目配置路径 |
+| `--mode auto` | 接收配置支持的全部音频和视频，默认值 |
+| `--mode audio` | 只接收音频文件 |
+| `--mode video` | 只接收视频文件 |
+
+导入一个目录：
+
+```powershell
+voice-dataset ingest $workspace $inputPath
+```
+
+导入多个文件和目录：
+
+```powershell
+voice-dataset ingest `
+  $workspace `
+  'D:\media\chapter-1' `
+  'D:\media\chapter-2\dialogue.wav' `
+  'D:\media\chapter-3\scene.mp4'
+```
+
+只导入视频：
+
+```powershell
+voice-dataset ingest $workspace $inputPath --mode video
+```
+
+主要产物：
+
+```text
+<workspace>\normalized\...
+<workspace>\manifests\sources.jsonl
+```
+
+同内容文件按 SHA-256 去重；视频会提取规范化音轨。该命令不移动或删除原文件。
+
+### `split`：只拆分语音边界
+
+完整语法：
+
+```powershell
+voice-dataset split `
+  <workspace> `
+  [--config <project-config.toml>] `
+  [--backend energy|gemini] `
+  [--modality auto|audio|video] `
+  [--secrets <credentials.toml>] `
+  [--limit <数量>] `
+  [--replace]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--backend energy` | 本地 Python 能量检测，不调用网络 |
+| `--backend gemini` | 上传媒体并调用 Gemini，只接收时间边界 |
+| `--modality auto` | 按来源媒体自动选择，默认取配置值 |
+| `--modality audio` | 分析规范化音轨 |
+| `--modality video` | Gemini 读取原始视频；energy 仍只分析提取音轨 |
+| `--secrets` | 指定另一个敏感配置，仅 Gemini 后端使用 |
+| `--limit N` | 本次最多处理 N 个尚未处理的来源，适合小批量试跑 |
+| `--replace` | 重新拆分已有来源，并重置已失效片段的标签与复核决定 |
+
+纯本地音频拆分：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend energy `
+  --modality audio
+```
+
+纯本地处理视频的音轨：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend energy `
+  --modality video
+```
+
+Gemini 音频语义拆分：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend gemini `
+  --modality audio
+```
+
+Gemini 视频多模态拆分：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend gemini `
+  --modality video
+```
+
+先试跑 5 个来源：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend gemini `
+  --modality video `
+  --limit 5
+```
+
+确认新参数后重新拆分：
+
+```powershell
+voice-dataset split `
+  $workspace `
+  --backend energy `
+  --modality audio `
+  --replace
+```
+
+主要产物：
+
+```text
+<workspace>\manifests\segments.jsonl
+<workspace>\manifests\clips.jsonl
+<workspace>\clips\*.wav
+```
+
+没有 `--replace` 时，已有边界的来源会跳过。替换拆分如果没有产生任何有效片段，命令会
+报错并保留旧清单。
+
+### `label`：Gemini 转写、情绪和聚类
+
+完整语法：
+
+```powershell
+voice-dataset label `
+  <workspace> `
+  [--config <project-config.toml>] `
+  [--provider gemini] `
+  [--language <语言提示>] `
+  [--secrets <credentials.toml>] `
+  [--limit <数量>] `
+  [--force]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--provider gemini` | 当前唯一标注提供方 |
+| `--language auto` | 自动判断语言，默认值 |
+| `--language zh` | 提示模型按中文转写；也可传入 `en`、`ja` 等提示 |
+| `--secrets` | 指定另一个敏感配置文件 |
+| `--limit N` | 本次最多标注 N 个待处理片段 |
+| `--force` | 重新调用模型并覆盖已有候选标注，会再次消耗 API 配额 |
+
+标注全部未处理片段：
+
+```powershell
+voice-dataset label $workspace --provider gemini --language zh
+```
+
+先标注 20 条检查效果：
+
+```powershell
+voice-dataset label `
+  $workspace `
+  --provider gemini `
+  --language zh `
+  --limit 20
+```
+
+使用指定敏感配置重新标注：
+
+```powershell
+voice-dataset label `
+  $workspace `
+  --provider gemini `
+  --secrets 'D:\private-config\character-a.credentials.toml' `
+  --force
+```
+
+产物：
+
+```text
+<workspace>\manifests\labels.jsonl
+```
+
+模型只能从 `review.emotions` 和 `review.clusters` 共享词表中选择类别。模型结果仍是候选，
+必须经过人工复核。
+
+### `review`：启动断点续作 TUI
+
+完整语法：
+
+```powershell
+voice-dataset review `
+  <workspace> `
+  [--config <project-config.toml>]
+```
+
+启动或继续复核：
+
+```powershell
+voice-dataset review $workspace
+```
+
+使用另一套非敏感项目配置：
+
+```powershell
+voice-dataset review `
+  $workspace `
+  --config 'D:\configs\character-a.pipeline.toml'
+```
+
+按键：
+
+| 按键 | 操作 |
+| --- | --- |
+| `0` | 播放当前音频 |
+| `1`–`N` | 选择对应情绪并确认 |
+| `X` | 排除 |
+| `E` | 编辑台词 |
+| `K` | 编辑聚类 |
+| `S` | 跳过并放到队尾 |
+| `R` | 刷新 |
+| `B` | 撤销上一次操作 |
+| `Q` | 保存并退出 |
+
+状态实时写入：
+
+```text
+<workspace>\state\review.json
+```
+
+`Ctrl+C` 或终端异常退出后，执行同一命令即可继续。
+
+### `status`：只读检查阶段计数
+
+完整语法：
+
+```powershell
+voice-dataset status <workspace>
+```
+
+示例：
+
+```powershell
+voice-dataset status $workspace
+```
+
+输出字段包括：
+
+```text
+sources
+segments
+clips
+labels
+reviewed
+draft_decisions
+review_cursor
+```
+
+该命令不接受 `--config`，也不修改工作区。
+
+### `export`：物化训练集
+
+完整语法：
+
+```powershell
+voice-dataset export `
+  <workspace> `
+  [--config <project-config.toml>] `
+  [--output <directory>] `
+  [--speaker <speaker-name>] `
+  [--language <zh|ja|en|ko|yue>] `
+  [--allow-unreviewed]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--output` | 导出父目录；省略时写入 `<workspace>\training\exports` |
+| `--speaker` | 覆盖导出清单中的说话人名称 |
+| `--language` | 覆盖 GPT-SoVITS 清单语言 |
+| `--allow-unreviewed` | 允许导出未确认条目；默认禁止 |
+
+标准导出：
+
+```powershell
+voice-dataset export `
+  $workspace `
+  --output $exportPath `
+  --speaker 'character_a' `
+  --language zh
+```
+
+使用默认输出目录：
+
+```powershell
+voice-dataset export $workspace
+```
+
+调试性导出未复核条目：
+
+```powershell
+# 不建议用于正式训练。训练器默认仍会拒绝 reviewed=false 的记录。
+voice-dataset export $workspace --allow-unreviewed
+```
+
+每次导出使用内容指纹生成不可变目录：
+
+```text
+dataset-<fingerprint>\
+  metadata.json
+  manifest.jsonl
+  reviewed\<emotion>\<cluster>\<clip-id>.wav
+  reviewed\<emotion>\<cluster>\<clip-id>.txt
+  gpt-sovits\dataset.list
+  rvc\dataset\*.wav
+```
+
+review、切片或影响数据集的配置变化后，旧导出会被 `train` 判定为过期，必须重新执行
+`export`。
+
+### `train`：GPT-SoVITS 与 RVC 训练编排
+
+完整语法：
+
+```powershell
+voice-dataset train `
+  <workspace> `
+  gpt-sovits|rvc `
+  [--config <project-config.toml>] `
+  [--dataset <dataset-directory>] `
+  [--execute]
+```
+
+参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `gpt-sovits` | 生成或执行 GPT-SoVITS 两阶段训练计划 |
+| `rvc` | 生成或执行 RVC 预处理、F0、HuBERT、训练和索引计划 |
+| `--dataset` | 指定某个 `dataset-<fingerprint>`；省略时选择最新有效导出 |
+| `--execute` | 真正执行外部预处理和训练 |
+
+只生成 GPT-SoVITS 计划：
+
+```powershell
+voice-dataset train $workspace gpt-sovits
+```
+
+只生成 RVC 计划：
+
+```powershell
+voice-dataset train $workspace rvc
+```
+
+指定导出数据集：
+
+```powershell
+$dataset = 'D:\voice-datasets\character-a\dataset-0123456789ab'
+voice-dataset train $workspace gpt-sovits --dataset $dataset
+```
+
+显式执行：
+
+```powershell
+# 还必须在 config/pipeline.toml 中同时启用：
+# [training] enabled = true
+# [training.gpt_sovits] enabled = true
+voice-dataset train $workspace gpt-sovits --execute
+
+# RVC 对应需要 [training.rvc] enabled = true
+voice-dataset train $workspace rvc --execute
+```
+
+生成计划后即可检查：
+
+```text
+<workspace>\training\gpt_sovits\<experiment_name>\training-plan.json
+<workspace>\training\rvc\<experiment_name>\training-plan.json
+```
+
+执行 `--execute` 后，每个外部命令分别写入日志：
+
+```text
+<workspace>\training\gpt_sovits\<experiment_name>\logs\<command>.log
+<workspace>\training\rvc\<experiment_name>\logs\<command>.log
+```
+
+训练完成并通过产物校验后还会生成 `artifacts.json` 和 `training-result.json`。同名
+experiment 的数据、配置、底模或外部仓库代码指纹发生变化时，工具会拒绝覆盖；请使用
+新的 `experiment_name`，不要删除门禁后强行复用旧特征。
+
+查看某次训练的日志：
+
+```powershell
+$run = Join-Path $workspace 'training\gpt_sovits\character_a_v2proplus'
+Get-ChildItem -LiteralPath (Join-Path $run 'logs') -Filter '*.log'
+Get-Content -LiteralPath (Join-Path $run 'logs\train-gpt.log') -Tail 100
+```
+
+### 一套可复制的纯本地拆分流程
+
+以下流程不会调用 Gemini，只生成可供后续人工处理的 WAV 切片：
+
+```powershell
+$repo = 'D:\voice-dataset-pipeline'
+$workspace = 'D:\voice-workspaces\character-a'
+$inputPath = 'D:\media\character-a'
+
+Set-Location $repo
+voice-dataset init $workspace --config '.\examples\project\pipeline.toml'
+voice-dataset ingest $workspace $inputPath --mode auto
+voice-dataset split $workspace --backend energy --modality audio
+voice-dataset status $workspace
+```
+
+如果继续执行 `review`，没有模型候选转写的条目需要使用 `E` 手工填写台词，再用数字键
+确认情绪。
+
+### 一套可复制的 Gemini 完整流程
+
+```powershell
+$repo = 'D:\voice-dataset-pipeline'
+$workspace = 'D:\voice-workspaces\character-a'
+$inputPath = 'D:\media\character-a'
+$exportPath = 'D:\voice-datasets\character-a'
+
+Set-Location $repo
+python .\scripts\generate_configs.py $workspace
+
+# 编辑以下两个互相独立的文件：
+# $workspace\config\pipeline.toml
+# $workspace\secrets\credentials.toml
+
+voice-dataset init $workspace
+voice-dataset ingest $workspace $inputPath --mode auto
+voice-dataset split $workspace --backend gemini --modality video
+voice-dataset label $workspace --provider gemini --language zh
+voice-dataset review $workspace
+voice-dataset status $workspace
+voice-dataset export $workspace --output $exportPath --speaker 'character_a' --language zh
+voice-dataset train $workspace gpt-sovits
+voice-dataset train $workspace rvc
+```
+
+最后两条命令只生成计划。确认计划、日志路径、外部工程和基础模型正确后，再分别附加
+`--execute`。

@@ -47,22 +47,40 @@ python -m pip install -e .
 
 ## 快速开始
 
-以下命令展示完整流程。CLI 的最终参数以当前版本的 `--help` 为准；第一次使用时建议先查看每个子命令的帮助。
+以下 PowerShell 命令展示从初始化到生成训练计划的完整流程。`energy` 与 `gemini`
+是两种可选拆分后端，不需要对同一批素材连续执行两者。
 
 ```powershell
+$repo = 'D:\voice-dataset-pipeline'
 $workspace = 'D:\voice-workspaces\character-a'
 $inputPath = 'D:\media\character-a'
+$exportPath = 'D:\voice-datasets\character-a'
 
+Set-Location $repo
 voice-dataset init $workspace --config '.\examples\project\pipeline.toml'
 # 非敏感项目配置：$workspace\config\pipeline.toml
 # 敏感本地配置：$workspace\secrets\credentials.toml（整个目录由 .gitignore 保护）
+
 voice-dataset ingest $workspace $inputPath
+
+# 二选一：纯本地音轨拆分
 voice-dataset split $workspace --backend energy --modality audio
+
+# 或：Gemini 多模态拆分
+# voice-dataset split $workspace --backend gemini --modality video
+
 voice-dataset label $workspace --provider gemini
 voice-dataset review $workspace
-voice-dataset export $workspace --output 'D:\voice-datasets\character-a'
+voice-dataset status $workspace
+voice-dataset export $workspace --output $exportPath
+
+# 默认只生成计划，不启动训练
 voice-dataset train $workspace gpt-sovits
 voice-dataset train $workspace rvc
+
+# 检查计划无误后才执行：
+# voice-dataset train $workspace gpt-sovits --execute
+# voice-dataset train $workspace rvc --execute
 ```
 
 `ingest` 会递归处理目录，并跳过不受支持的文件。工作区保存来源清单、中间状态、不可变切片和复核记录；请为不同角色使用不同工作区。
@@ -186,6 +204,25 @@ python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a' --help
 完整字段和默认值见示例 TOML；生成的 `training-plan.json` 会记录实际命令与指纹。
 
 完整阶段说明见 [docs/WORKFLOW.md](docs/WORKFLOW.md)。
+
+### 命令速查
+
+| 目的 | 命令 |
+| --- | --- |
+| 生成两类配置 | `python scripts/generate_configs.py <workspace>` |
+| 初始化工作区 | `voice-dataset init <workspace>` |
+| 递归导入 | `voice-dataset ingest <workspace> <file-or-directory> [...]` |
+| 本地拆分 | `voice-dataset split <workspace> --backend energy` |
+| Gemini 拆分 | `voice-dataset split <workspace> --backend gemini --modality video` |
+| Gemini 标注 | `voice-dataset label <workspace> --provider gemini` |
+| 人工复核 | `voice-dataset review <workspace>` |
+| 查看进度 | `voice-dataset status <workspace>` |
+| 导出训练集 | `voice-dataset export <workspace> [--output <directory>]` |
+| 生成训练计划 | `voice-dataset train <workspace> {gpt-sovits,rvc}` |
+| 执行训练 | `voice-dataset train <workspace> {gpt-sovits,rvc} --execute` |
+
+所有参数、覆盖行为、输出位置和可复制示例见
+[详细命令手册](docs/WORKFLOW.md#完整命令参考)。
 
 ## 安全与可复现性
 
