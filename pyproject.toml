@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-dataset-pipeline"
+version = "0.1.0"
+description = "Headless audio/video segmentation, Gemini labeling, TUI review, and voice-model training orchestration."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "DogTwoMey" }]
+dependencies = [
+  "numpy>=1.26,<3",
+  "pydantic>=2.8,<3",
+  "soundfile>=0.12,<1",
+]
+
+[project.optional-dependencies]
+gemini = [
+  "google-genai>=2.3,<3",
+]
+train = [
+  "PyYAML>=6,<7",
+]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.12,<1",
+]
+all = [
+  "google-genai>=2.3,<3",
+  "PyYAML>=6,<7",
+]
+
+[project.scripts]
+voice-dataset = "voice_dataset_pipeline.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

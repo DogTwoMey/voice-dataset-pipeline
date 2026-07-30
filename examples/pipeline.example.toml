@@ -1,0 +1,126 @@
+# Copy this file outside the repository and customize it per character.
+# Never add GEMINI_API_KEY or any other secret here.
+
+[media]
+ffmpeg_binary = "ffmpeg"
+sample_rate = 48000
+audio_extensions = [
+  ".wav",
+  ".flac",
+  ".mp3",
+  ".m4a",
+  ".aac",
+  ".ogg",
+  ".opus",
+  ".wma",
+  ".aif",
+  ".aiff",
+]
+video_extensions = [
+  ".mp4",
+  ".mkv",
+  ".mov",
+  ".avi",
+  ".webm",
+  ".m4v",
+  ".wmv",
+  ".flv",
+  ".ts",
+  ".mts",
+  ".m2ts",
+]
+
+[splitting]
+# energy is local. gemini is an explicit remote multimodal call.
+backend = "energy"
+# The CLI --modality option can select audio, video, or auto when supported.
+input_mode = "audio"
+frame_ms = 30
+hop_ms = 10
+adaptive_percentile = 20.0
+threshold_offset_db = 10.0
+threshold_floor_db = -55.0
+threshold_ceiling_db = -25.0
+min_speech_ms = 180
+min_silence_ms = 180
+min_segment_seconds = 0.8
+merge_gap_ms = 300
+padding_ms = 120
+max_segment_seconds = 15.0
+boundary_search_ms = 750
+stream_block_frames = 65536
+
+[gemini]
+# The key is read only from this environment variable.
+api_key_env = "GEMINI_API_KEY"
+# Choose a Gemini model available to your account and region.
+model = "gemini-3.6-flash"
+timeout_seconds = 120.0
+max_retries = 3
+
+[review]
+# TUI number keys follow this exact order: 1 = neutral, 2 = happy, ...
+emotions = [
+  "neutral",
+  "happy",
+  "sad",
+  "angry",
+  "surprised",
+  "fearful",
+  "disgusted",
+  "unknown",
+]
+# Gemini must choose one shared style cluster, avoiding per-clip singleton names.
+clusters = [
+  "calm_soft",
+  "conversational",
+  "bright_playful",
+  "sad_soft",
+  "tense_loud",
+  "whisper",
+  "unknown",
+]
+# Leave empty to use the operating system's default audio player.
+play_command = ""
+
+[training]
+# This is an additional configuration gate. The CLI still requires --execute
+# before it runs any external training command.
+enabled = false
+
+[training.gpt_sovits]
+enabled = false
+repository = "D:/GPT-SoVITS"
+python = "D:/GPT-SoVITS/.venv/Scripts/python.exe"
+experiment_name = "character_a_gpt_sovits"
+model_version = "v2ProPlus"
+speaker = "character_a"
+language = "zh"
+require_reviewed = true
+gpu = 0
+full_precision = true
+sovits_batch_size = 6
+sovits_epochs = 12
+sovits_save_every = 4
+text_low_lr_rate = 0.4
+grad_checkpoint = false
+lora_rank = 32
+gpt_batch_size = 6
+gpt_epochs = 20
+gpt_save_every = 5
+
+[training.rvc]
+enabled = false
+repository = "D:/RVC-WebUI"
+python = "D:/RVC-WebUI/.venv/Scripts/python.exe"
+experiment_name = "character_a_rvc"
+version = "v2"
+sample_rate = "48k"
+require_reviewed = true
+gpu = 0
+workers = 4
+batch_size = 6
+epochs = 200
+save_every = 25
+preprocess_seconds = 3.7
+half = true
