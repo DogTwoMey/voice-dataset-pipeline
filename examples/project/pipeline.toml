@@ -1,5 +1,5 @@
-# Copy this file outside the repository and customize it per character.
-# Never add GEMINI_API_KEY or any other secret here.
+# Non-sensitive project configuration. This file is safe to commit per character.
+# Credentials belong in a separate secrets/credentials.toml file.
 
 [media]
 ffmpeg_binary = "ffmpeg"
@@ -51,7 +51,7 @@ boundary_search_ms = 750
 stream_block_frames = 65536
 
 [gemini]
-# The key is read only from this environment variable.
+# Look up this name in secrets/credentials.toml, then in the process environment.
 api_key_env = "GEMINI_API_KEY"
 # Choose a Gemini model available to your account and region.
 model = "gemini-3.6-flash"

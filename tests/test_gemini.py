@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from voice_dataset_pipeline import cli
+from voice_dataset_pipeline.config import generate_default_config_layout, load_config
 from voice_dataset_pipeline.errors import ExternalToolError
 from voice_dataset_pipeline.gemini import (
     GeminiInteractions,
@@ -207,3 +209,25 @@ def test_label_falls_back_to_unknown_emotion_and_sanitizes_cluster(
         "schema": GeminiLabelResult.model_json_schema(),
     }
     assert client.files.delete_calls == ["files/test-upload"]
+
+
+def test_cli_reads_gemini_key_from_separate_secrets_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = generate_default_config_layout(tmp_path)
+    layout.secrets.write_text(
+        '[environment]\nGEMINI_API_KEY = "fixture-token"\n',
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_interactions(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli, "GeminiInteractions", fake_interactions)
+
+    cli._gemini(load_config(layout.project), tmp_path, None)
+
+    assert captured["api_key"] == "fixture-token"

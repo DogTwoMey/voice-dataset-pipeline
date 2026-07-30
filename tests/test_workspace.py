@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from voice_dataset_pipeline.config import load_config
+from voice_dataset_pipeline.cli import main
+from voice_dataset_pipeline.config import (
+    config_layout,
+    generate_default_config_layout,
+    load_config,
+    load_secrets,
+    write_secrets_gitignore,
+)
 from voice_dataset_pipeline.models import ReviewDecision, ReviewState
 from voice_dataset_pipeline.workspace import Workspace
 
@@ -64,3 +73,65 @@ def test_config_forbids_unknown_fields_and_api_keys(tmp_path):
 
     with pytest.raises(ValidationError, match="api_key"):
         load_config(config_path)
+
+
+def test_init_generates_separate_project_and_gitignored_secret_configs(tmp_path):
+    workspace = tmp_path / "job"
+
+    assert main(["init", str(workspace)]) == 0
+
+    layout = config_layout(workspace)
+    assert layout.project == workspace.resolve() / "config/pipeline.toml"
+    assert layout.secrets == workspace.resolve() / "secrets/credentials.toml"
+    assert layout.project.is_file()
+    assert layout.secrets.is_file()
+    assert layout.project.parent != layout.secrets.parent
+    assert load_config(layout.project).gemini.api_key_env == "GEMINI_API_KEY"
+    assert load_secrets(layout.secrets).get("GEMINI_API_KEY") is None
+    rules = layout.secrets_gitignore.read_text(encoding="utf-8").splitlines()
+    assert "*" in rules
+    assert "!.gitignore" in rules
+
+
+def test_config_generator_preserves_files_unless_overwrite_is_explicit(tmp_path):
+    layout = generate_default_config_layout(tmp_path)
+    layout.project.write_text("# retained project\n", encoding="utf-8")
+    layout.secrets.write_text(
+        '[environment]\nGEMINI_API_KEY = "fixture-token"\n',
+        encoding="utf-8",
+    )
+
+    generated = generate_default_config_layout(tmp_path)
+
+    assert generated == layout
+    assert layout.project.read_text(encoding="utf-8") == "# retained project\n"
+    secrets = load_secrets(layout.secrets)
+    assert secrets.get("GEMINI_API_KEY") == "fixture-token"
+    assert "fixture-token" not in repr(secrets)
+
+
+def test_secrets_config_rejects_non_environment_variable_names(tmp_path):
+    path = tmp_path / "credentials.toml"
+    path.write_text('[environment]\n"gemini.api-key" = "bad"\n', encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="invalid environment variable"):
+        load_secrets(path)
+
+
+def test_secrets_gitignore_rejects_rules_that_reinclude_credentials(tmp_path):
+    path = tmp_path / "secrets/.gitignore"
+    path.parent.mkdir()
+    path.write_text("*\n!.gitignore\n!credentials.toml\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain only"):
+        write_secrets_gitignore(path)
+
+
+def test_repository_project_and_secret_examples_remain_valid():
+    root = Path(__file__).resolve().parents[1]
+
+    project = load_config(root / "examples/project/pipeline.toml")
+    secrets = load_secrets(root / "examples/secrets/credentials.toml.example")
+
+    assert project.gemini.api_key_env == "GEMINI_API_KEY"
+    assert secrets.get("GEMINI_API_KEY") is None

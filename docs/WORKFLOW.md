@@ -31,11 +31,17 @@ voice-dataset train --help
 ffmpeg -version
 ```
 
-如果使用 Gemini，确认当前进程中存在密钥，但不要输出它：
+如果使用 Gemini，优先检查独立敏感配置是否存在；也可以确认当前进程中存在环境变量，
+但不要输出密钥值：
 
 ```powershell
-if ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
-    Write-Output '[WARN] GEMINI_API_KEY is not set'
+$workspace = 'D:\voice-workspaces\character-a'
+$secrets = Join-Path $workspace 'secrets\credentials.toml'
+if (Test-Path -LiteralPath $secrets) {
+    Write-Output "[OK] secrets file exists: $secrets"
+}
+elseif ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
+    Write-Output '[WARN] no secrets file and GEMINI_API_KEY is not set'
 }
 else {
     Write-Output '[OK] GEMINI_API_KEY is set'
@@ -53,16 +59,21 @@ $workspace = 'D:\voice-workspaces\character-a'
 voice-dataset init $workspace
 ```
 
-初始化是本地、低成本操作，不会扫描媒体、调用 Gemini 或启动训练。工作区用于保存配置、来源清单、拆分结果、不可变音频切片、标签、复核状态与导出记录。
+初始化是本地、低成本操作，不会扫描媒体、调用 Gemini 或启动训练。它会生成：
 
-配置可从仓库示例复制后修改：
+- `config/pipeline.toml`：非敏感项目配置，可以提交和评审。
+- `secrets/credentials.toml`：API Key、Token 等敏感值。
+- `secrets/.gitignore`：忽略敏感目录中的所有内容，仅保留规则本身。
+
+也可以使用独立生成脚本：
 
 ```powershell
-New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-Copy-Item '.\examples\pipeline.example.toml' (Join-Path $workspace 'pipeline.toml')
+python .\scripts\generate_configs.py $workspace
 ```
 
-不要在配置中写入 API Key。
+脚本默认不覆盖任何已有配置。项目模板位于 `examples/project/`，敏感空白模板位于
+`examples/secrets/`；两类文件不共用目录。不要在 `config/pipeline.toml` 中写入
+API Key。
 
 ## 2. 导入媒体
 
@@ -135,7 +146,7 @@ Gemini 只允许返回原始时间轴上的边界。它不能把生成或改写�
 
 ## 4. Gemini 标注与聚类
 
-设置当前进程的 Key 后，显式运行：
+在 `secrets/credentials.toml` 或当前进程环境变量中设置 Key 后，显式运行：
 
 ```powershell
 voice-dataset label $workspace --provider gemini
@@ -150,11 +161,13 @@ voice-dataset label $workspace --provider gemini
 
 情绪集合来自角色配置，TUI 的数字顺序与配置完全一致。模型输出只是草稿；人工复核前不要直接训练。
 
-API Key 只允许从配置指定的环境变量读取，默认变量名是 `GEMINI_API_KEY`。项目配置、状态文件和日志不得持久化 Key。
+项目配置中的 `gemini.api_key_env` 只保存查找名称，默认是 `GEMINI_API_KEY`。程序先从
+独立的 `secrets/credentials.toml` 查找该名称，再回退到当前进程环境变量。项目配置、
+状态文件和日志不得持久化 Key；也可通过 `--secrets` 显式选择另一个敏感配置文件。
 
 如果调用失败：
 
-1. 检查 `GEMINI_API_KEY` 是否只在当前进程中有效。
+1. 检查敏感配置中的键名是否与 `gemini.api_key_env` 一致，或环境变量是否有效。
 2. 检查模型是否对当前账号和地区开放。
 3. 检查媒体大小、网络和配额。
 4. 重新执行 `label`；已经成功并持久化的条目不应重复计费。
@@ -221,7 +234,9 @@ voice-dataset train $workspace gpt-sovits
 voice-dataset train $workspace gpt-sovits --execute
 ```
 
-具体 epoch、batch size 和版本参数在角色 `pipeline.toml` 的 `training.gpt_sovits` 中配置；完整字段见仓库示例，实际底模路径、命令和指纹以生成的 `training-plan.json` 为准。
+具体 epoch、batch size 和版本参数在角色 `config/pipeline.toml` 的
+`training.gpt_sovits` 中配置；完整字段见仓库示例，实际底模路径、命令和指纹以生成的
+`training-plan.json` 为准。
 
 ## 8. RVC 后处理模型训练
 
@@ -251,7 +266,7 @@ voice-dataset train $workspace rvc --execute
 
 | 操作 | 网络/API | 是否启动训练 | 主要写入 |
 | --- | --- | --- | --- |
-| `init` | 否 | 否 | 工作区骨架 |
+| `init` | 否 | 否 | 工作区骨架、项目配置、Git 忽略的敏感配置 |
 | `ingest` | 否 | 否 | 来源清单、规范化媒体 |
 | `split --backend energy` | 否 | 否 | 边界、切片 |
 | `split --backend gemini` | 是 | 否 | 边界、切片 |

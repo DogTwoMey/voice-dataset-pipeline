@@ -93,6 +93,7 @@ class GeminiInteractions:
         *,
         model: str,
         api_key_env: str = "GEMINI_API_KEY",
+        api_key: str | None = None,
         timeout_seconds: float = 120,
         max_retries: int = 3,
         client: Any | None = None,
@@ -106,10 +107,10 @@ class GeminiInteractions:
             self.client = client
             return
 
-        api_key = os.environ.get(api_key_env, "").strip()
-        if not api_key:
+        resolved_api_key = (api_key or os.environ.get(api_key_env, "")).strip()
+        if not resolved_api_key:
             raise ConfigurationError(
-                f"未设置环境变量 {api_key_env}；API Key 不应写入 TOML 或 Git。"
+                f"未在 secrets/credentials.toml 或环境变量 {api_key_env} 中提供 API Key。"
             )
         try:
             from google import genai
@@ -117,7 +118,7 @@ class GeminiInteractions:
             raise ConfigurationError(
                 "缺少 Gemini 依赖；请执行 pip install 'voice-dataset-pipeline[gemini]'"
             ) from exc
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=resolved_api_key)
 
     def _wait_until_active(self, uploaded: Any) -> Any:
         deadline = time.monotonic() + self.timeout_seconds

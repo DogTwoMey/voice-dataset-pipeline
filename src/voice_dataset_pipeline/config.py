@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from .models import InputMode, SplitBackend, StrictModel
 
@@ -93,6 +95,39 @@ preprocess_seconds = 3.7
 half = true
 
 """.lstrip()
+
+DEFAULT_SECRETS = r"""
+# Sensitive local values only. Never commit this file.
+# Keys are environment-variable names referenced by the project configuration.
+[environment]
+GEMINI_API_KEY = ""
+""".lstrip()
+
+SECRETS_GITIGNORE = r"""
+# Keep every local credential in this directory out of Git.
+*
+!.gitignore
+""".lstrip()
+
+PROJECT_CONFIG_RELATIVE = Path("config/pipeline.toml")
+SECRETS_CONFIG_RELATIVE = Path("secrets/credentials.toml")
+LEGACY_PROJECT_CONFIG_RELATIVE = Path("pipeline.toml")
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigLayout:
+    project: Path
+    secrets: Path
+    secrets_gitignore: Path
+
+
+def config_layout(root: str | Path) -> ConfigLayout:
+    base = Path(root).expanduser().resolve()
+    return ConfigLayout(
+        project=base / PROJECT_CONFIG_RELATIVE,
+        secrets=base / SECRETS_CONFIG_RELATIVE,
+        secrets_gitignore=base / SECRETS_CONFIG_RELATIVE.parent / ".gitignore",
+    )
 
 
 class MediaConfig(StrictModel):
@@ -194,6 +229,30 @@ class PipelineConfig(StrictModel):
     training: TrainingConfig
 
 
+class SecretsConfig(StrictModel):
+    """Local credentials keyed by their configured environment-variable name."""
+
+    environment: dict[str, SecretStr] = Field(default_factory=dict)
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment_names(
+        cls,
+        value: dict[str, SecretStr],
+    ) -> dict[str, SecretStr]:
+        invalid = sorted(name for name in value if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name))
+        if invalid:
+            raise ValueError(f"invalid environment variable names: {invalid}")
+        return value
+
+    def get(self, name: str) -> str | None:
+        value = self.environment.get(name)
+        if value is None:
+            return None
+        revealed = value.get_secret_value().strip()
+        return revealed or None
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in override.items():
@@ -217,6 +276,16 @@ def load_config(path: str | Path | None = None) -> PipelineConfig:
     return PipelineConfig.model_validate(raw)
 
 
+def load_secrets(path: str | Path | None = None) -> SecretsConfig:
+    """Load a distinct local credential file; a missing default means no secrets."""
+
+    if path is None:
+        return SecretsConfig()
+    secrets_path = Path(path).expanduser().resolve()
+    with secrets_path.open("rb") as stream:
+        return SecretsConfig.model_validate(tomllib.load(stream))
+
+
 def write_default_config(path: str | Path, *, overwrite: bool = False) -> Path:
     """Create a documented starter config without clobbering user changes."""
 
@@ -226,3 +295,52 @@ def write_default_config(path: str | Path, *, overwrite: bool = False) -> Path:
     with destination.open(mode, encoding="utf-8", newline="\n") as stream:
         stream.write(DEFAULT_CONFIG)
     return destination
+
+
+def write_default_secrets(path: str | Path, *, overwrite: bool = False) -> Path:
+    """Create an empty local credential file without exposing any real token."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    mode: Literal["w", "x"] = "w" if overwrite else "x"
+    with destination.open(mode, encoding="utf-8", newline="\n") as stream:
+        stream.write(DEFAULT_SECRETS)
+    return destination
+
+
+def write_secrets_gitignore(path: str | Path) -> Path:
+    """Protect the complete secrets directory, preserving only its ignore rule."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        rules = [
+            line.strip()
+            for line in destination.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if rules != ["*", "!.gitignore"]:
+            raise ValueError(
+                f"secrets .gitignore must contain only '*' followed by '!.gitignore': {destination}"
+            )
+        return destination
+    with destination.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(SECRETS_GITIGNORE)
+    return destination
+
+
+def generate_default_config_layout(
+    root: str | Path,
+    *,
+    overwrite_project: bool = False,
+    overwrite_secrets: bool = False,
+) -> ConfigLayout:
+    """Generate separate project and credential files under one workspace root."""
+
+    layout = config_layout(root)
+    write_secrets_gitignore(layout.secrets_gitignore)
+    if overwrite_project or not layout.project.exists():
+        write_default_config(layout.project, overwrite=overwrite_project)
+    if overwrite_secrets or not layout.secrets.exists():
+        write_default_secrets(layout.secrets, overwrite=overwrite_secrets)
+    return layout

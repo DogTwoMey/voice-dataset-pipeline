@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import PipelineConfig, load_config, write_default_config
+from .config import (
+    LEGACY_PROJECT_CONFIG_RELATIVE,
+    PipelineConfig,
+    SecretsConfig,
+    config_layout,
+    load_config,
+    load_secrets,
+    write_default_config,
+    write_default_secrets,
+    write_secrets_gitignore,
+)
 from .errors import VoiceDatasetError
 from .exporting import current_training_fingerprint, export_training_dataset
 from .gemini import GeminiInteractions
@@ -37,7 +47,7 @@ def _add_common(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument(
         "--config",
         type=Path,
-        help="TOML 配置；默认读取 <workspace>/pipeline.toml",
+        help="非敏感 TOML 配置；默认读取 <workspace>/config/pipeline.toml",
     )
 
 
@@ -52,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="初始化本地工作区和默认配置")
     _add_common(init)
     init.add_argument("--overwrite-config", action="store_true")
+    init.add_argument("--overwrite-secrets", action="store_true")
 
     ingest = commands.add_parser("ingest", help="递归导入并规范化音视频")
     _add_common(ingest)
@@ -62,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(split)
     split.add_argument("--backend", choices=[item.value for item in SplitBackend])
     split.add_argument("--modality", choices=[item.value for item in InputMode])
+    split.add_argument(
+        "--secrets",
+        type=Path,
+        help="敏感配置；默认读取 <workspace>/secrets/credentials.toml",
+    )
     split.add_argument("--limit", type=int)
     split.add_argument(
         "--replace",
@@ -73,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(label)
     label.add_argument("--provider", choices=["gemini"], default="gemini")
     label.add_argument("--language", default="auto")
+    label.add_argument(
+        "--secrets",
+        type=Path,
+        help="敏感配置；默认读取 <workspace>/secrets/credentials.toml",
+    )
     label.add_argument("--limit", type=int)
     label.add_argument("--force", action="store_true", help="重新标注已有条目")
 
@@ -100,26 +121,51 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_for(workspace: Path, explicit: Path | None) -> PipelineConfig:
     if explicit is not None:
         return load_config(explicit)
-    local = workspace.expanduser().resolve() / "pipeline.toml"
-    return load_config(local if local.is_file() else None)
+    root = workspace.expanduser().resolve()
+    layout = config_layout(root)
+    if layout.project.is_file():
+        return load_config(layout.project)
+    legacy = root / LEGACY_PROJECT_CONFIG_RELATIVE
+    return load_config(legacy if legacy.is_file() else None)
+
+
+def _load_secrets_for(workspace: Path, explicit: Path | None) -> SecretsConfig:
+    if explicit is not None:
+        return load_secrets(explicit)
+    local = config_layout(workspace).secrets
+    return load_secrets(local if local.is_file() else None)
 
 
 def _init(args: argparse.Namespace) -> int:
     workspace = Workspace.create(args.workspace)
-    destination = workspace.root / "pipeline.toml"
-    if destination.exists() and not args.overwrite_config:
-        print(f"工作区已存在，保留配置: {destination}")
-        return 0
-    if args.config is not None:
+    layout = config_layout(workspace.root)
+    legacy = workspace.root / LEGACY_PROJECT_CONFIG_RELATIVE
+    if layout.project.exists() and not args.overwrite_config:
+        print(f"保留项目配置: {layout.project}")
+    elif args.config is not None:
         source = args.config.expanduser().resolve()
         load_config(source)
-        if source != destination:
-            shutil.copy2(source, destination)
+        layout.project.parent.mkdir(parents=True, exist_ok=True)
+        if source != layout.project:
+            shutil.copy2(source, layout.project)
         print(f"已复制配置模板: {source}")
+    elif legacy.is_file() and not args.overwrite_config:
+        load_config(legacy)
+        layout.project.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, layout.project)
+        print(f"已迁移旧项目配置: {legacy}")
     else:
-        write_default_config(destination, overwrite=args.overwrite_config)
+        write_default_config(layout.project, overwrite=args.overwrite_config)
+
+    write_secrets_gitignore(layout.secrets_gitignore)
+    if layout.secrets.exists() and not args.overwrite_secrets:
+        print(f"保留敏感配置: {layout.secrets}")
+    else:
+        write_default_secrets(layout.secrets, overwrite=args.overwrite_secrets)
+
     print(f"工作区: {workspace.root}")
-    print(f"配置: {destination}")
+    print(f"项目配置（可提交）: {layout.project}")
+    print(f"敏感配置（Git 忽略）: {layout.secrets}")
     return 0
 
 
@@ -133,10 +179,16 @@ def _ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _gemini(config: PipelineConfig) -> GeminiInteractions:
+def _gemini(
+    config: PipelineConfig,
+    workspace: Path,
+    secrets_path: Path | None,
+) -> GeminiInteractions:
+    secrets = _load_secrets_for(workspace, secrets_path)
     return GeminiInteractions(
         model=config.gemini.model,
         api_key_env=config.gemini.api_key_env,
+        api_key=secrets.get(config.gemini.api_key_env),
         timeout_seconds=config.gemini.timeout_seconds,
         max_retries=config.gemini.max_retries,
     )
@@ -195,7 +247,9 @@ def _split(args: argparse.Namespace) -> int:
     backend = SplitBackend(args.backend or config.splitting.backend.value)
     requested = InputMode(args.modality or config.splitting.input_mode.value)
     local = EnergySplitter(config.splitting)
-    remote = _gemini(config) if backend is SplitBackend.GEMINI else None
+    remote = (
+        _gemini(config, args.workspace, args.secrets) if backend is SplitBackend.GEMINI else None
+    )
     processed = 0
     skipped = 0
     incompatible = 0
@@ -263,7 +317,7 @@ def _label(args: argparse.Namespace) -> int:
     workspace = Workspace.open(args.workspace, create=False)
     result = label_clips(
         workspace,
-        _gemini(config),
+        _gemini(config, args.workspace, args.secrets),
         emotions=config.review.emotions,
         clusters=config.review.clusters,
         language_hint=args.language,

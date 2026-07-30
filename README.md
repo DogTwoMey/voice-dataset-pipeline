@@ -19,8 +19,8 @@
 
 - Python 3.11 或更高版本。
 - [FFmpeg](https://ffmpeg.org/) 可从 `PATH` 直接调用，或在 TOML 配置中指定可执行文件。
-- 使用 Gemini 时安装 `gemini` 可选依赖，并仅通过配置指定的环境变量
-  （默认 `GEMINI_API_KEY`）提供密钥。
+- 使用 Gemini 时安装 `gemini` 可选依赖；密钥只能来自独立的
+  `secrets/credentials.toml` 或配置指定的环境变量（默认 `GEMINI_API_KEY`）。
 - 训练 GPT-SoVITS 时，需要用户自行准备可运行的 GPT-SoVITS 工程、Python 环境和基础模型。
 - 训练或使用 RVC 后处理时，需要用户自行准备可运行的 RVC 工程、Python 环境和基础模型。
 
@@ -53,8 +53,9 @@ python -m pip install -e .
 $workspace = 'D:\voice-workspaces\character-a'
 $inputPath = 'D:\media\character-a'
 
-voice-dataset init $workspace --config '.\examples\pipeline.example.toml'
-# 在继续训练前编辑 $workspace\pipeline.toml 中的外部工程路径、参数和 enabled 开关。
+voice-dataset init $workspace --config '.\examples\project\pipeline.toml'
+# 非敏感项目配置：$workspace\config\pipeline.toml
+# 敏感本地配置：$workspace\secrets\credentials.toml（整个目录由 .gitignore 保护）
 voice-dataset ingest $workspace $inputPath
 voice-dataset split $workspace --backend energy --modality audio
 voice-dataset label $workspace --provider gemini
@@ -70,7 +71,17 @@ voice-dataset train $workspace rvc
 
 Gemini 调用不会在 `init`、`ingest` 或本地 `energy` 拆分时隐式发生。只有用户明确选择 Gemini 拆分或执行 `label` 时才会产生网络请求和配额消耗。
 
-在当前 PowerShell 进程中安全地输入密钥：
+`init` 会生成独立的敏感配置，编辑其中的空值即可：
+
+```toml
+# <workspace>/secrets/credentials.toml
+[environment]
+GEMINI_API_KEY = ""
+```
+
+只在本地把空值替换为实际密钥。该目录包含自己的 `.gitignore`，默认忽略除规则文件外
+的全部内容。也可以不写敏感
+文件，改为在当前 PowerShell 进程中输入密钥：
 
 ```powershell
 $secureKey = Read-Host 'Gemini API key' -AsSecureString
@@ -78,7 +89,9 @@ $credential = New-Object System.Net.NetworkCredential('', $secureKey)
 $env:GEMINI_API_KEY = $credential.Password
 ```
 
-不要把密钥写入 TOML、`.env`、命令行参数或 Git。
+不要把密钥写入 `config/pipeline.toml`、命令行参数或 Git。显式
+`--secrets` 可选择另一个敏感配置文件；没有敏感文件或其中的值为空时，程序回退到
+环境变量。
 
 Gemini 可以按音频或视频内容建议边界；模型拆分仍然只产出时间区间：
 
@@ -141,12 +154,26 @@ RVC 训练完成必须同时存在可推理的 `.pth` 权重；只有 `.index` �
 
 ## 配置
 
-复制 [examples/pipeline.example.toml](examples/pipeline.example.toml)，再为角色调整情绪类别、拆分阈值和外部训练工程路径。工作区由每条命令的位置参数指定；配置中不提供 Gemini Key。
+配置按职责分离：
+
+| 类型 | 默认位置 | Git 策略 |
+| --- | --- | --- |
+| 非敏感项目配置 | `<workspace>/config/pipeline.toml` | 可以提交和评审 |
+| API Key、Token 等敏感配置 | `<workspace>/secrets/credentials.toml` | 整个 `secrets` 目录默认忽略 |
+
+可以通过 `init` 或独立 Python 脚本生成两套默认文件；脚本默认保留已有文件，只有显式
+传入覆盖参数才会重写：
 
 ```powershell
-Copy-Item '.\examples\pipeline.example.toml' 'D:\voice-workspaces\character-a\pipeline.toml'
-voice-dataset --help
+python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a'
+python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a' --help
 ```
+
+可提交模板见 [examples/project/pipeline.toml](examples/project/pipeline.toml)，空白敏感
+模板见
+[examples/secrets/credentials.toml.example](examples/secrets/credentials.toml.example)。
+旧版 `<workspace>/pipeline.toml` 仍可读取；再次执行 `init` 会将其复制到新的
+`config/` 目录。
 
 常用训练字段：
 
@@ -164,7 +191,7 @@ voice-dataset --help
 
 - 原始输入只读；人工复核不会直接移动或改写不可变切片。
 - 导出阶段才根据复核状态物化训练目录，避免资源管理器或播放器锁定文件时破坏状态。
-- API Key 只从配置指定的环境变量读取，默认变量名为 `GEMINI_API_KEY`。
+- API Key 只从独立的敏感配置或指定环境变量读取；项目配置只保存变量名。
 - Gemini 调用和实际训练都必须由用户显式启动。
 - 默认训练命令只做预检和计划准备；`--execute` 是启动预处理及训练的明确授权。
 - 请在训练前保存配置、清单和工作区指纹，以免把旧中间产物误用于新数据。

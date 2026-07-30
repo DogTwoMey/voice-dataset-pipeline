@@ -44,6 +44,10 @@ training/
 *.ckpt
 *.index
 
-# Secrets and local overrides
+# Sensitive configuration only. Non-sensitive config/ files remain trackable.
+/secrets/
+**/secrets/credentials.toml
+*.secrets.toml
 .env
-*.local.toml
+.env.*
+!.env.example
