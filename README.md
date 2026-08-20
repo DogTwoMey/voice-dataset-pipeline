@@ -1,6 +1,6 @@
 # voice-dataset-pipeline
 
-一个独立、无前端的 Python 工具，用于把本地音频或视频整理为可人工复核的语音训练集，并编排 GPT-SoVITS 与 RVC 的训练流程。
+一个独立、无前端的 Python 工具，用于把本地音频或视频整理为可人工复核的语音训练集，编排 GPT-SoVITS/RVC 训练，并以“文本 + 可选参考音频”直接生成角色语音。
 
 项目由 DogTwoMey 维护：[DogTwoMey/voice-dataset-pipeline](https://github.com/DogTwoMey/voice-dataset-pipeline)。仓库只保存代码、示例配置和文档；原始媒体、切片、人工复核状态、导出数据集、API Key 与模型权重都不应提交到 Git。
 
@@ -12,19 +12,26 @@
 - 在终端 TUI 中逐条播放、修正情绪、编辑文本、排除素材，并在异常退出后继续。
 - 导出适合资源管理器检查的训练集：音频与同名文本文件直观对应。
 - 为 GPT-SoVITS 和 RVC 生成训练计划；只有传入 `--execute` 才会启动外部训练。
+- 以 sidecar 字幕、内嵌字幕、视觉模型、静音切分的顺序回退，记录实际边界来源。
+- 使用本地 SenseVoice 生成转写与语音情绪草稿，并以时长、RMS、削顶和静音比做质量门禁。
+- 把已训练 GPT/SoVITS 权重登记为角色模型；按情绪自动挑选经过复核的参考音频。
+- 对目标文本生成统一情绪计划，通过模型注册时记录的 GPT-SoVITS 专属 Python 启动隔离 worker，无需启动 WebUI/API 服务。
+- 可选调用独立 RVC 环境做后处理，并始终保留未转换的 SoVITS 原始 WAV。
 
 拆分与标注是两个独立阶段。拆分阶段只决定音频边界，不会把模型改写的文本当作训练台词；最终标签仍以人工复核结果为准。
 
 ## 环境要求
 
-- Python 3.11 或更高版本。
+- 编排器使用 Python 3.11 或更高版本；推荐 Python 3.12。
 - [FFmpeg](https://ffmpeg.org/) 可从 `PATH` 直接调用，或在 TOML 配置中指定可执行文件。
 - 使用 Gemini 时安装 `gemini` 可选依赖；密钥只能来自独立的
   `secrets/credentials.toml` 或配置指定的环境变量（默认 `GEMINI_API_KEY`）。
 - 训练 GPT-SoVITS 时，需要用户自行准备可运行的 GPT-SoVITS 工程、Python 环境和基础模型。
 - 训练或使用 RVC 后处理时，需要用户自行准备可运行的 RVC 工程、Python 环境和基础模型。
 
-本项目不会安装 GPT-SoVITS、RVC、CUDA、基础模型或 FFmpeg，也不会自动下载大型模型。
+GPT-SoVITS、RVC、IndexTTS/Qwen3-TTS 等上游必须使用各自钉版仓库和独立 Python 环境。不要把所有模型塞入一个 Python 3.13 venv；不同上游的 PyTorch、音频与推理依赖并不兼容。本项目不会安装 CUDA、基础模型或 FFmpeg；但首次运行 SenseVoice 时，FunASR/ModelScope 可能自动下载尚未缓存的 ASR/VAD 模型。
+
+模型注册表同时保存 GPT-SoVITS 仓库、专属 Python、GPT/SoVITS 权重和参考清单，并封存已知推理底模与 provider Python 源码摘要。`synthesize` 只在该解释器的 worker 子进程中导入上游推理依赖，主管线环境不会直接加载另一套 PyTorch。训练时使用 `--register-as` 会自动登记 `[training.gpt_sovits].python`；手工登记已有权重时必须传入 `--python`。
 
 ## 安装
 
@@ -35,9 +42,25 @@ Set-Location 'D:\voice-dataset-pipeline'
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e '.[all]'
+python -m pip install -e '.[gemini,train,asr]'
 voice-dataset --help
 ```
+
+`asr` 只安装 FunASR/ModelScope，故意不替你选择 PyTorch 的 CPU/CUDA
+轮子。要在这个编排器环境中运行 SenseVoice，先按
+[PyTorch 官方安装器](https://pytorch.org/get-started/locally/) 安装与显卡驱动匹配的
+`torch`/`torchaudio`，并用以下命令确认：
+
+```powershell
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+如果 ASR 使用另一个已验证的模型环境，先用 `preprocess --skip-asr` 完成切分和
+质量门禁，再在该环境中运行 `python -m voice_dataset_pipeline transcribe`。
+
+ASR 配置同时固定模型/VAD revision 以及 FunASR、ModelScope 版本；运行环境不匹配时
+会在加载模型前失败。`master` 只是 provider 的符号 revision，并非模型内容哈希；追求
+严格复现时应把它替换为 ModelScope 支持的不可变 revision。
 
 只使用本地能量拆分、不调用 Gemini 或训练适配器时，可以安装基础依赖：
 
@@ -47,8 +70,7 @@ python -m pip install -e .
 
 ## 快速开始
 
-以下 PowerShell 命令展示从初始化到生成训练计划的完整流程。`energy` 与 `gemini`
-是两种可选拆分后端，不需要对同一批素材连续执行两者。
+以下 PowerShell 命令展示从素材到可合成角色模型的完整流程：
 
 ```powershell
 $repo = 'D:\voice-dataset-pipeline'
@@ -61,14 +83,7 @@ voice-dataset init $workspace --config '.\examples\project\pipeline.toml'
 # 非敏感项目配置：$workspace\config\pipeline.toml
 # 敏感本地配置：$workspace\secrets\credentials.toml（整个目录由 .gitignore 保护）
 
-voice-dataset ingest $workspace $inputPath
-
-# 二选一：纯本地音轨拆分
-voice-dataset split $workspace --backend energy --modality audio
-
-# 或：Gemini 多模态拆分
-# voice-dataset split $workspace --backend gemini --modality video
-
+voice-dataset preprocess $workspace $inputPath --asr
 voice-dataset label $workspace --provider gemini
 voice-dataset review $workspace
 voice-dataset status $workspace
@@ -78,16 +93,19 @@ voice-dataset export $workspace --output $exportPath
 voice-dataset train $workspace gpt-sovits
 voice-dataset train $workspace rvc
 
-# 检查计划无误后才执行：
-# voice-dataset train $workspace gpt-sovits --execute
+# 检查计划无误后才执行；成功后自动登记并激活模型：
+# voice-dataset train $workspace gpt-sovits --execute --register-as character_a --activate
 # voice-dataset train $workspace rvc --execute
+
+# 文本 + 自动情绪参考 -> WAV
+# voice-dataset synthesize $workspace --text '你好，很高兴见到你。' --output '.\out.wav'
 ```
 
 `ingest` 会递归处理目录，并跳过不受支持的文件。工作区保存来源清单、中间状态、不可变切片和复核记录；请为不同角色使用不同工作区。
 
 ### 使用 Gemini
 
-Gemini 调用不会在 `init`、`ingest` 或本地 `energy` 拆分时隐式发生。只有用户明确选择 Gemini 拆分或执行 `label` 时才会产生网络请求和配额消耗。
+Gemini 调用不会在 `init`、`ingest` 或本地 `energy` 拆分时发生。执行 Gemini 拆分、`label`，或执行一个已在项目配置中选择 `splitting.backend=gemini` 的 `preprocess`，都会上传相应媒体并产生网络请求和配额消耗；配置选择也视为明确授权。
 
 `init` 会生成独立的敏感配置，编辑其中的空值即可：
 
@@ -120,6 +138,14 @@ voice-dataset split $workspace --backend gemini --modality auto
 voice-dataset label $workspace --provider gemini
 ```
 
+视频超过 `[gemini.chunking].threshold_seconds` 时，工具先用本地 FFmpeg
+`silencedetect` 在静音附近规划连续窗口，再转成低码率预览块逐块调用 Gemini；短视频
+和音频保持单次调用。窗口、转码块和每块已验证的边界分别缓存在
+`<workspace>\state\gemini_chunks`，因此中途失败后不会重复已经成功的远端调用。
+缓存指纹绑定源内容、块参数、Gemini 模型和片段时长约束。设置
+`reuse_chunks=false` 可强制重新调用；设置 `keep_chunks=false` 会在调用后删除预览 MP4，
+但保留时间窗口清单和边界 JSON 供审计、断点续跑。
+
 `energy` 是纯本地音频算法，不理解画面语义；对视频执行
 `--backend energy --modality video` 时，它只分析导入阶段提取的规范化音轨。
 `gemini` 会上传所需媒体并调用远端模型，适合需要多模态上下文的素材。
@@ -134,6 +160,7 @@ voice-dataset review $workspace
 TUI 每次显示一个切片及其台词。主要按键：
 
 - `0`：用系统播放器播放当前音频。
+- `M`：把当前片段与下一片段无损重建为一个新片段；旧 WAV 保留。
 - `1`–`N`：直接指定配置中对应的情绪类别。
 - `X`：排除当前条目。
 - `E`：编辑台词。
@@ -142,6 +169,8 @@ TUI 每次显示一个切片及其台词。主要按键：
 - `R`：刷新当前条目。
 - `B`：撤销上一次操作。
 - `Q`：保存并退出。
+
+界面同时显示前一条和后一条台词，便于识别跨句粗切与过细切分。执行 `M` 后，新片段需要再次运行 `quality` 和 `transcribe`；结构性合并会清空旧撤销栈，避免撤销记录指向已失效 clip。
 
 每次操作都会持久化。正常退出、`Ctrl+C` 或意外中断后，重新执行同一命令即可从断点继续。
 
@@ -168,7 +197,7 @@ voice-dataset train $workspace gpt-sovits --execute
 voice-dataset train $workspace rvc --execute
 ```
 
-RVC 训练完成必须同时存在可推理的 `.pth` 权重；只有 `.index` 文件不代表模型已经可用于后处理。本项目训练 RVC 后处理模型，但不包含 RVC 推理命令。
+RVC 训练完成必须同时存在可推理的 `.pth` 权重；只有 `.index` 文件不代表模型已经可用于后处理。将 RVC 权重与索引登记到角色模型后，可通过 `synthesize --postprocess rvc` 转换；工具同时保留 `*.sovits.wav`，方便 A/B 检查吐字是否劣化。
 
 ## 配置
 
@@ -212,14 +241,20 @@ python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a' --help
 | 生成两类配置 | `python scripts/generate_configs.py <workspace>` |
 | 初始化工作区 | `voice-dataset init <workspace>` |
 | 递归导入 | `voice-dataset ingest <workspace> <file-or-directory> [...]` |
+| 高层预处理 | `voice-dataset preprocess <workspace> <input...> [--asr]` |
 | 本地拆分 | `voice-dataset split <workspace> --backend energy` |
 | Gemini 拆分 | `voice-dataset split <workspace> --backend gemini --modality video` |
 | Gemini 标注 | `voice-dataset label <workspace> --provider gemini` |
 | 人工复核 | `voice-dataset review <workspace>` |
 | 查看进度 | `voice-dataset status <workspace>` |
+| 本地转写 | `voice-dataset transcribe <workspace>` |
+| 音质门禁 | `voice-dataset quality <workspace>` |
 | 导出训练集 | `voice-dataset export <workspace> [--output <directory>]` |
 | 生成训练计划 | `voice-dataset train <workspace> {gpt-sovits,rvc}` |
 | 执行训练 | `voice-dataset train <workspace> {gpt-sovits,rvc} --execute` |
+| 模型注册 | `voice-dataset model register <workspace> ...` |
+| 情绪计划 | `voice-dataset emotion <workspace> --text <台词>` |
+| 合成语音 | `voice-dataset synthesize <workspace> --text <台词> --output <wav>` |
 
 所有参数、覆盖行为、输出位置和可复制示例见
 [详细命令手册](docs/WORKFLOW.md#完整命令参考)。
@@ -229,7 +264,7 @@ python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a' --help
 - 原始输入只读；人工复核不会直接移动或改写不可变切片。
 - 导出阶段才根据复核状态物化训练目录，避免资源管理器或播放器锁定文件时破坏状态。
 - API Key 只从独立的敏感配置或指定环境变量读取；项目配置只保存变量名。
-- Gemini 调用和实际训练都必须由用户显式启动。
+- Gemini 调用和实际训练都必须由用户显式启动；`preprocess` 会遵循已保存的 Gemini 后端配置。
 - 默认训练命令只做预检和计划准备；`--execute` 是启动预处理及训练的明确授权。
 - 请在训练前保存配置、清单和工作区指纹，以免把旧中间产物误用于新数据。
 

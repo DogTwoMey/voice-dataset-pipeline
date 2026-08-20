@@ -39,6 +39,7 @@ def label_clips(
     language_hint: str = "auto",
     force: bool = False,
     limit: int | None = None,
+    replacements: dict[str, str] | None = None,
 ) -> LabelSummary:
     """Label pending clips and atomically persist every successful result."""
 
@@ -46,12 +47,14 @@ def label_clips(
     labels = workspace.read_jsonl(workspace.paths.labels_jsonl, LabelRecord)
     assert isinstance(clips, list)
     assert isinstance(labels, list)
-    existing = {row.clip_id for row in labels}
+    existing = {row.clip_id: row for row in labels}
     labelled = 0
     skipped = 0
     attempted = 0
     for clip in clips:
-        if not force and clip.clip_id in existing:
+        prior = existing.get(clip.clip_id)
+        provisional_asr = prior is not None and prior.rationale.startswith("local SenseVoice seed;")
+        if not force and prior is not None and not provisional_asr:
             skipped += 1
             continue
         if limit is not None and attempted >= limit:
@@ -68,11 +71,16 @@ def label_clips(
             raise ValueError(
                 f"labeler returned clip_id {result.clip_id!r}, expected {clip.clip_id!r}"
             )
+        transcript = result.transcript
+        for source, target in (replacements or {}).items():
+            transcript = transcript.replace(source, target)
+        if transcript != result.transcript:
+            result = result.model_copy(update={"transcript": transcript})
         workspace.upsert_jsonl(
             workspace.paths.labels_jsonl,
             result,
             key="clip_id",
         )
-        existing.add(clip.clip_id)
+        existing[clip.clip_id] = result
         labelled += 1
     return LabelSummary(total=len(clips), labelled=labelled, skipped=skipped)

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voice-dataset-pipeline"
-version = "0.1.0"
-description = "Headless audio/video segmentation, Gemini labeling, TUI review, and voice-model training orchestration."
+version = "0.2.0"
+description = "Headless character-voice dataset, training, emotion planning, and synthesis pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -24,6 +24,10 @@ gemini = [
 train = [
   "PyYAML>=6,<7",
 ]
+asr = [
+  "funasr==1.4.2",
+  "modelscope==1.39.1",
+]
 dev = [
   "pytest>=8,<10",
   "ruff>=0.12,<1",
@@ -31,6 +35,8 @@ dev = [
 all = [
   "google-genai>=2.3,<3",
   "PyYAML>=6,<7",
+  "funasr==1.4.2",
+  "modelscope==1.39.1",
 ]
 
 [project.scripts]

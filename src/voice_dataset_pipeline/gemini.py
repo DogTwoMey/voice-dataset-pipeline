@@ -157,11 +157,12 @@ class GeminiInteractions:
                 "uri": uploaded.uri,
                 "mime_type": getattr(uploaded, "mime_type", None) or _mime_for(path, modality),
             }
+            attempt_prompt = prompt
             for attempt in range(self.max_retries + 1):
                 try:
                     interaction = self.client.interactions.create(
                         model=self.model,
-                        input=[media_part, {"type": "text", "text": prompt}],
+                        input=[media_part, {"type": "text", "text": attempt_prompt}],
                         response_format={
                             "type": "text",
                             "mime_type": "application/json",
@@ -176,6 +177,13 @@ class GeminiInteractions:
                 except Exception as exc:
                     if attempt >= self.max_retries or not _retryable(exc):
                         raise
+                    feedback = " ".join(str(exc).split())[:500]
+                    attempt_prompt = (
+                        f"{prompt}\n\nYour previous JSON response was rejected by the "
+                        "deterministic "
+                        f"validator: {feedback}. Return a corrected complete JSON response; "
+                        "do not repeat the invalid boundary pattern."
+                    )
                     self._sleep(min(8.0, 2.0**attempt))
             raise AssertionError("unreachable")
         except (ConfigurationError, ExternalToolError) as exc:

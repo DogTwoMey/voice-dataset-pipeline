@@ -58,6 +58,81 @@ model = "gemini-3.6-flash"
 timeout_seconds = 120.0
 max_retries = 3
 
+[gemini.chunking]
+# Videos longer than threshold_seconds are transcoded into small, contiguous
+# blocks around local silence before Gemini sees them.
+enabled = true
+threshold_seconds = 180.0
+target_seconds = 90.0
+max_seconds = 120.0
+boundary_search_seconds = 15.0
+min_silence_seconds = 0.30
+silence_noise_db = -40.0
+video_height = 360
+video_bitrate_kbps = 500
+audio_bitrate_kbps = 64
+# Reuse content-addressed blocks after a retry; set keep_chunks=false to clean
+# media files after each call (the timing manifest remains inspectable).
+reuse_chunks = true
+keep_chunks = true
+
+[asr]
+enabled = false
+provider = "sensevoice"
+model = "iic/SenseVoiceSmall"
+vad_model = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+model_revision = "master"
+vad_revision = "master"
+funasr_version = "1.4.2"
+modelscope_version = "1.39.1"
+device = "cuda:0"
+language = "auto"
+# Per-character proper-noun corrections. Keep secrets out of this table.
+replacements = {}
+
+[quality]
+enabled = true
+min_duration_seconds = 1.0
+max_duration_seconds = 12.0
+min_rms_dbfs = -45.0
+max_rms_dbfs = -8.0
+max_clipping_ratio = 0.001
+max_silence_ratio = 0.45
+min_transcript_similarity = 0.72
+require_asr = false
+
+[emotion]
+# rules is offline. For openai-compatible, replace both endpoint and model;
+# api_key_env is read from the separate secrets file.
+provider = "rules"
+base_url = "https://example.invalid/v1"
+model = "replace-with-model-id"
+api_key_env = "OPENAI_COMPAT_API_KEY"
+timeout_seconds = 60.0
+
+[reference]
+preferred_min_seconds = 3.0
+preferred_max_seconds = 10.0
+
+[inference]
+default_model = ""
+device = "cuda"
+half = true
+language = "zh"
+seed = -1
+
+[registry]
+path = "models/registry.json"
+
+[postprocess]
+enabled = false
+backend = "rvc"
+f0_method = "rmvpe"
+transpose = 0
+index_rate = 0.45
+rms_mix_rate = 0.25
+protect = 0.33
+
 [review]
 # TUI number keys follow this exact order: 1 = neutral, 2 = happy, ...
 emotions = [
@@ -100,14 +175,14 @@ require_reviewed = true
 gpu = 0
 full_precision = true
 sovits_batch_size = 6
-sovits_epochs = 12
-sovits_save_every = 4
+sovits_epochs = 8
+sovits_save_every = 2
 text_low_lr_rate = 0.4
 grad_checkpoint = false
 lora_rank = 32
 gpt_batch_size = 6
-gpt_epochs = 20
-gpt_save_every = 5
+gpt_epochs = 12
+gpt_save_every = 3
 
 [training.rvc]
 enabled = false

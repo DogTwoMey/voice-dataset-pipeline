@@ -167,6 +167,42 @@ def test_split_rejects_overlapping_boundaries_and_deletes_upload(
     assert client.files.delete_calls == ["files/test-upload"]
 
 
+def test_split_retry_includes_validator_feedback(tmp_path: Path) -> None:
+    path = _media_file(tmp_path)
+    client = _FakeClient(
+        [
+            {
+                "segments": [
+                    {"start_ms": 100, "end_ms": 1000},
+                    {"start_ms": 900, "end_ms": 1500},
+                ]
+            },
+            {"segments": [{"start_ms": 100, "end_ms": 1500}]},
+        ],
+        initially_active=True,
+    )
+    gemini = GeminiInteractions(
+        model="gemini-test",
+        client=client,
+        max_retries=1,
+        sleep=lambda _seconds: None,
+    )
+
+    segments = gemini.split(
+        path=path,
+        modality="audio",
+        source_id="source-1",
+        duration_seconds=2.0,
+        min_segment_seconds=0.5,
+        max_segment_seconds=10.0,
+    )
+
+    assert len(segments) == 1
+    second_prompt = client.interactions.calls[1]["input"][1]["text"]  # type: ignore[index]
+    assert "previous JSON response was rejected" in second_prompt
+    assert "重叠或乱序边界" in second_prompt
+
+
 def test_label_falls_back_to_unknown_emotion_and_sanitizes_cluster(
     tmp_path: Path,
 ) -> None:

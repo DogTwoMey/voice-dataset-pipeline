@@ -5,7 +5,8 @@ import soundfile as sf
 
 from voice_dataset_pipeline.config import load_config
 from voice_dataset_pipeline.media import sha256_file
-from voice_dataset_pipeline.splitting import EnergySplitter
+from voice_dataset_pipeline.models import Segment
+from voice_dataset_pipeline.splitting import EnergySplitter, materialize_clips
 
 SAMPLE_RATE = 8_000
 
@@ -97,3 +98,25 @@ def test_max_duration_and_immutable_materialization(tmp_path, monkeypatch):
 
     assert [record.clip_id for record in records] == [record.clip_id for record in repeated]
     assert all(record.audio_path.is_file() for record in repeated)
+
+
+def test_materialization_preserves_subtitle_text_hint(tmp_path):
+    audio = tmp_path / "hint.wav"
+    _write(audio, [_tone(1.0)])
+    source_id = sha256_file(audio)
+
+    records = materialize_clips(
+        audio,
+        [
+            Segment(
+                source_id=source_id,
+                start_seconds=0,
+                end_seconds=1,
+                text_hint="字幕提示",
+                provenance={"strategy": "sidecar_subtitle"},
+            )
+        ],
+        tmp_path / "clips",
+    )
+
+    assert records[0].text == "字幕提示"

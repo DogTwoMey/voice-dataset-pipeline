@@ -48,6 +48,75 @@ model = "gemini-3.6-flash"
 timeout_seconds = 120.0
 max_retries = 3
 
+[gemini.chunking]
+# Long videos are locally divided around silence before remote analysis.
+enabled = true
+threshold_seconds = 180.0
+target_seconds = 90.0
+max_seconds = 120.0
+boundary_search_seconds = 15.0
+min_silence_seconds = 0.30
+silence_noise_db = -40.0
+video_height = 360
+video_bitrate_kbps = 500
+audio_bitrate_kbps = 64
+reuse_chunks = true
+keep_chunks = true
+
+[asr]
+enabled = false
+provider = "sensevoice"
+model = "iic/SenseVoiceSmall"
+vad_model = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+model_revision = "master"
+vad_revision = "master"
+funasr_version = "1.4.2"
+modelscope_version = "1.39.1"
+device = "cuda:0"
+language = "auto"
+replacements = {}
+
+[quality]
+enabled = true
+min_duration_seconds = 1.0
+max_duration_seconds = 12.0
+min_rms_dbfs = -45.0
+max_rms_dbfs = -8.0
+max_clipping_ratio = 0.001
+max_silence_ratio = 0.45
+min_transcript_similarity = 0.72
+require_asr = false
+
+[emotion]
+provider = "rules"
+base_url = "https://example.invalid/v1"
+model = "replace-with-model-id"
+api_key_env = "OPENAI_COMPAT_API_KEY"
+timeout_seconds = 60.0
+
+[reference]
+preferred_min_seconds = 3.0
+preferred_max_seconds = 10.0
+
+[inference]
+default_model = ""
+device = "cuda"
+half = true
+language = "zh"
+seed = -1
+
+[registry]
+path = "models/registry.json"
+
+[postprocess]
+enabled = false
+backend = "rvc"
+f0_method = "rmvpe"
+transpose = 0
+index_rate = 0.45
+rms_mix_rate = 0.25
+protect = 0.33
+
 [review]
 emotions = ["neutral", "happy", "sad", "angry", "surprised", "fearful", "disgusted", "unknown"]
 clusters = [
@@ -69,13 +138,13 @@ require_reviewed = true
 full_precision = true
 gpu = 0
 sovits_batch_size = 6
-sovits_epochs = 12
+sovits_epochs = 8
 text_low_lr_rate = 0.4
 sovits_save_every = 4
 grad_checkpoint = false
 lora_rank = 32
 gpt_batch_size = 6
-gpt_epochs = 20
+gpt_epochs = 12
 gpt_save_every = 5
 
 [training.rvc]
@@ -101,6 +170,7 @@ DEFAULT_SECRETS = r"""
 # Keys are environment-variable names referenced by the project configuration.
 [environment]
 GEMINI_API_KEY = ""
+OPENAI_COMPAT_API_KEY = ""
 """.lstrip()
 
 SECRETS_GITIGNORE = r"""
@@ -164,11 +234,110 @@ class SplittingConfig(StrictModel):
         return self
 
 
+class GeminiChunkingConfig(StrictModel):
+    """Local, content-addressed preparation for long Gemini video calls."""
+
+    enabled: bool = True
+    threshold_seconds: float = Field(default=180, gt=0)
+    target_seconds: float = Field(default=90, gt=0)
+    max_seconds: float = Field(default=120, gt=0)
+    boundary_search_seconds: float = Field(default=15, ge=0)
+    min_silence_seconds: float = Field(default=0.3, gt=0)
+    silence_noise_db: float = Field(default=-40, ge=-100, le=0)
+    video_height: int = Field(default=360, ge=144, le=2160)
+    video_bitrate_kbps: int = Field(default=500, ge=64, le=20_000)
+    audio_bitrate_kbps: int = Field(default=64, ge=16, le=512)
+    reuse_chunks: bool = True
+    keep_chunks: bool = True
+
+    @model_validator(mode="after")
+    def validate_durations(self) -> GeminiChunkingConfig:
+        if self.target_seconds > self.max_seconds:
+            raise ValueError("target_seconds must not exceed max_seconds")
+        return self
+
+
 class GeminiConfig(StrictModel):
     api_key_env: str = "GEMINI_API_KEY"
     model: str = "gemini-3.6-flash"
     timeout_seconds: float = Field(default=120, gt=0)
     max_retries: int = Field(default=3, ge=0)
+    chunking: GeminiChunkingConfig = Field(default_factory=GeminiChunkingConfig)
+
+
+class ASRConfig(StrictModel):
+    enabled: bool = False
+    provider: Literal["sensevoice"] = "sensevoice"
+    model: str = "iic/SenseVoiceSmall"
+    vad_model: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    model_revision: str = "master"
+    vad_revision: str = "master"
+    funasr_version: str = "1.4.2"
+    modelscope_version: str = "1.39.1"
+    device: str = "cuda:0"
+    language: str = "auto"
+    replacements: dict[str, str] = Field(default_factory=dict)
+
+
+class QualityConfig(StrictModel):
+    enabled: bool = True
+    min_duration_seconds: float = Field(default=1.0, gt=0)
+    max_duration_seconds: float = Field(default=12.0, gt=0)
+    min_rms_dbfs: float = Field(default=-45.0, le=0)
+    max_rms_dbfs: float = Field(default=-8.0, le=0)
+    max_clipping_ratio: float = Field(default=0.001, ge=0, le=1)
+    max_silence_ratio: float = Field(default=0.45, ge=0, le=1)
+    min_transcript_similarity: float = Field(default=0.72, ge=0, le=1)
+    require_asr: bool = False
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> QualityConfig:
+        if self.max_duration_seconds <= self.min_duration_seconds:
+            raise ValueError("max_duration_seconds must exceed min_duration_seconds")
+        if self.max_rms_dbfs <= self.min_rms_dbfs:
+            raise ValueError("max_rms_dbfs must exceed min_rms_dbfs")
+        return self
+
+
+class EmotionConfig(StrictModel):
+    provider: Literal["rules", "openai-compatible"] = "rules"
+    base_url: str = "https://example.invalid/v1"
+    model: str = "replace-with-model-id"
+    api_key_env: str = "OPENAI_COMPAT_API_KEY"
+    timeout_seconds: float = Field(default=60, gt=0)
+
+
+class ReferenceConfig(StrictModel):
+    preferred_min_seconds: float = Field(default=3.0, gt=0)
+    preferred_max_seconds: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> ReferenceConfig:
+        if self.preferred_max_seconds <= self.preferred_min_seconds:
+            raise ValueError("preferred_max_seconds must exceed preferred_min_seconds")
+        return self
+
+
+class InferenceConfig(StrictModel):
+    default_model: str = ""
+    device: str = "cuda"
+    half: bool = True
+    language: str = "zh"
+    seed: int = -1
+
+
+class RegistryConfig(StrictModel):
+    path: Path = Path("models/registry.json")
+
+
+class PostprocessConfig(StrictModel):
+    enabled: bool = False
+    backend: Literal["rvc"] = "rvc"
+    f0_method: str = "rmvpe"
+    transpose: int = Field(default=0, ge=-24, le=24)
+    index_rate: float = Field(default=0.45, ge=0, le=1)
+    rms_mix_rate: float = Field(default=0.25, ge=0, le=1)
+    protect: float = Field(default=0.33, ge=0, le=0.5)
 
 
 class ReviewConfig(StrictModel):
@@ -225,6 +394,13 @@ class PipelineConfig(StrictModel):
     media: MediaConfig
     splitting: SplittingConfig
     gemini: GeminiConfig
+    asr: ASRConfig
+    quality: QualityConfig
+    emotion: EmotionConfig
+    reference: ReferenceConfig
+    inference: InferenceConfig
+    registry: RegistryConfig
+    postprocess: PostprocessConfig
     review: ReviewConfig
     training: TrainingConfig
 

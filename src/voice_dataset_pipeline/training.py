@@ -719,6 +719,8 @@ class GPTSoVITSAdapter(_AdapterBase):
             {
                 "bert": repository / "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large",
                 "hubert": repository / "GPT_SoVITS/pretrained_models/chinese-hubert-base",
+                "g2pw": repository / "GPT_SoVITS/text/G2PWModel",
+                "language_detector": repository / "GPT_SoVITS/pretrained_models/fast_langdetect",
                 "sv": repository
                 / "GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt",
                 "s1_config": repository / "GPT_SoVITS/configs/s1longer-v2.yaml",
@@ -744,7 +746,9 @@ class GPTSoVITSAdapter(_AdapterBase):
                 *scripts,
             ]
         )
-        _require_directories([paths["bert"], paths["hubert"]])
+        _require_directories(
+            [paths["bert"], paths["hubert"], paths["g2pw"], paths["language_detector"]]
+        )
         if "Pro" in model_version:
             _require_files([paths["sv"]])
         pythonpath = [
@@ -775,7 +779,19 @@ class GPTSoVITSAdapter(_AdapterBase):
         provider_hashes = {
             name: _sha256_tree(path)
             for name, path in paths.items()
-            if name in {"s2_config", "s2g", "s2d", "s1", "bert", "hubert", "sv", "s1_config"}
+            if name
+            in {
+                "s2_config",
+                "s2g",
+                "s2d",
+                "s1",
+                "bert",
+                "hubert",
+                "g2pw",
+                "language_detector",
+                "sv",
+                "s1_config",
+            }
             and (name != "sv" or "Pro" in model_version)
         }
         provider_hashes.update(

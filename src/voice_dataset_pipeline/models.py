@@ -82,6 +82,8 @@ class Segment(StrictModel):
     end_seconds: Annotated[float, Field(gt=0)]
     average_dbfs: float | None = None
     backend: SplitBackend = SplitBackend.ENERGY
+    text_hint: str = ""
+    provenance: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def end_after_start(self) -> Segment:
@@ -145,6 +147,44 @@ class LabelRecord(StrictModel):
     labelled_at: datetime = Field(default_factory=utc_now)
 
 
+class QualityRecord(StrictModel):
+    """Reproducible acoustic quality decision for one immutable clip."""
+
+    clip_id: str
+    audio_path: Path
+    audio_sha256: str = Field(min_length=64, max_length=64)
+    profile_sha256: str = Field(min_length=64, max_length=64)
+    duration_seconds: Annotated[float, Field(gt=0)]
+    rms_dbfs: float
+    peak_dbfs: float
+    clipping_ratio: Annotated[float, Field(ge=0, le=1)]
+    silence_ratio: Annotated[float, Field(ge=0, le=1)]
+    accepted: bool
+    reasons: list[str] = Field(default_factory=list)
+    evaluated_at: datetime = Field(default_factory=utc_now)
+
+
+class ASRRecord(StrictModel):
+    """Local transcription and speech-emotion result for one clip."""
+
+    clip_id: str
+    audio_sha256: str = Field(min_length=64, max_length=64)
+    # Empty keeps manifests written before cache profiles were introduced
+    # readable.  Such records never match a current profile and are therefore
+    # recomputed (or rejected by a strict export gate).
+    profile_sha256: str = ""
+    transcript: str = ""
+    raw_text: str = ""
+    language: str = "auto"
+    emotion: str = Emotion.UNKNOWN.value
+    model: str = ""
+    expected_text: str = ""
+    transcript_similarity: Annotated[float | None, Field(ge=0, le=1)] = None
+    accepted: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    transcribed_at: datetime = Field(default_factory=utc_now)
+
+
 class ReviewDecision(StrictModel):
     """The latest human decision for one clip."""
 
@@ -166,3 +206,19 @@ class ReviewState(StrictModel):
     decisions: dict[str, ReviewDecision] = Field(default_factory=dict)
     history: list[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ReviewMergeReceipt(StrictModel):
+    """Redo log for one review merge spanning manifests and review state."""
+
+    version: Annotated[int, Field(ge=1)] = 1
+    left_clip_id: str
+    right_clip_id: str
+    merged_clip_id: str
+    clips: list[ClipRecord]
+    segments: list[Segment]
+    labels: list[LabelRecord]
+    quality: list[QualityRecord]
+    asr: list[ASRRecord]
+    review_state: ReviewState
+    created_at: datetime = Field(default_factory=utc_now)

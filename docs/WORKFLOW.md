@@ -1,16 +1,20 @@
 # 工作流
 
-本工具把“发现媒体、拆分、模型标注、人工复核、导出、训练”分为独立阶段。每一步都读取前一步的持久化清单，因此可以检查中间结果、重复运行安全步骤，并在训练前停下来确认。
+本工具把“发现媒体、字幕/语义拆分、本地 ASR、质量门禁、模型标注、人工复核、导出、训练、模型注册、情绪规划、合成、可选 VC”分为独立阶段。每一步都读取前一步的持久化清单，因此可以检查中间结果、重复运行安全步骤，并在训练前停下来确认。
 
 ```text
 本地文件或目录
     -> init / ingest
-    -> split (energy 或 Gemini；只生成边界)
+    -> preprocess (sidecar -> embedded -> vision -> silence)
+    -> transcribe / quality (SenseVoice + 声学门禁)
     -> label (Gemini；台词、情绪、聚类)
     -> review (人工确认，可断点续作)
     -> export (物化训练集)
     -> train gpt-sovits
     -> train rvc / RVC 后处理
+    -> model register / activate
+    -> emotion -> reference selection -> synthesize
+    -> optional RVC postprocess
 ```
 
 快速导航：
@@ -33,10 +37,16 @@ voice-dataset --help
 voice-dataset init --help
 voice-dataset ingest --help
 voice-dataset split --help
+voice-dataset preprocess --help
+voice-dataset transcribe --help
+voice-dataset quality --help
 voice-dataset label --help
 voice-dataset review --help
 voice-dataset export --help
 voice-dataset train --help
+voice-dataset model --help
+voice-dataset emotion --help
+voice-dataset synthesize --help
 voice-dataset status --help
 python .\scripts\generate_configs.py --help
 ffmpeg -version
@@ -155,6 +165,58 @@ Gemini。后端与模式组合会在执行前校验，当前版本支持的确�
 
 Gemini 只允许返回原始时间轴上的边界。它不能把生成或改写的台词直接写进训练集；边界必须经过范围、顺序、持续时间和重叠校验。
 
+长视频不会整段上传。超过 `[gemini.chunking].threshold_seconds` 后，管线使用本地
+FFmpeg 静音检测，在 `target_seconds` 附近选择切点且严格不超过 `max_seconds`，转码为
+低分辨率/低码率 MP4 后逐块调用 Gemini。块窗口必须从 0 连续覆盖到源媒体结尾；每块
+返回值先通过局部校验，再回映到全局时间轴并再次检查顺序和范围。缓存位于
+`<workspace>\state\gemini_chunks`：`manifest.json` 记录完整窗口，`*.segments.json`
+记录已经成功的远端边界，因而后续块失败后重跑不会重复前面块的 API 费用。
+`reuse_chunks` 控制复用，`keep_chunks=false` 仅清除临时 MP4，不清除可审计的边界缓存。
+
+### 高层 `preprocess`：回退拆分、质量门禁和本地 ASR
+
+```powershell
+voice-dataset preprocess `
+  <workspace> `
+  [<input> ...] `
+  [--mode auto|audio|video] `
+  [--config <project-config.toml>] `
+  [--secrets <credentials.toml>] `
+  [--replace] `
+  [--asr | --skip-asr] [--force-asr] [--force-quality]
+```
+
+当命令收到输入路径时会先递归导入；省略输入时处理工作区中已有来源。每个来源按以下顺序选第一个产生有效边界的策略：
+
+1. 同名或语言后缀的 `.srt/.vtt/.ass/.ssa` sidecar；
+2. FFprobe/FFmpeg 发现并提取的首个文本字幕流；
+3. 配置为 `splitting.backend=gemini` 时的视频语义拆分；
+4. 本地音轨静音/能量拆分。
+
+实际策略、尝试链和失败原因写入 segment provenance。随后声学门禁流式计算时长、RMS、峰值、削顶比和静音比，写入 `manifests/quality.jsonl`。存在质量记录时，未通过条目不会进入导出训练集。
+
+`--asr` 或 `asr.enabled=true` 会延迟加载 SenseVoice，写入 `manifests/asr.jsonl`，并为尚无标签的片段生成可复核台词/情绪草稿：
+
+```powershell
+voice-dataset transcribe $workspace
+voice-dataset transcribe $workspace --force
+voice-dataset quality $workspace
+voice-dataset quality $workspace --force
+```
+
+`asr` 可选依赖不包含 PyTorch，因为 CUDA 轮子必须按本机驱动单独选择。
+如果当前编排器 venv 没有可用的 GPU PyTorch，使用 `--skip-asr` 忽略配置中的
+`asr.enabled=true`，再在已安装 PyTorch/FunASR 且能够导入本项目的独立环境执行
+`python -m voice_dataset_pipeline transcribe <workspace>`。
+
+`--force` 会重新计算；否则音频哈希、模型或阈值配置未变化的条目直接复用。ASR 相似度是风险提示，最终台词仍由 TUI 人审决定。
+
+`[asr]` 中的 `model_revision`、`vad_revision`、`funasr_version` 和
+`modelscope_version` 都参与缓存与严格导出门禁。执行时会先核对已安装库版本；这避免
+环境升级后静默复用旧转写。默认 `master` 仍是浮动的 provider revision，不是模型文件
+内容哈希；需要位级复现时必须把它替换为服务端支持的不可变 revision，并在同一 ASR
+环境中重新运行 `transcribe --force`。
+
 ## 4. Gemini 标注与聚类
 
 在 `secrets/credentials.toml` 或当前进程环境变量中设置 Key 后，显式运行：
@@ -194,6 +256,7 @@ voice-dataset review $workspace
 | 按键 | 操作 |
 | --- | --- |
 | `0` | 用默认音频播放器播放 |
+| `M` | 将当前与下一片段重建为一个新片段，并停留在该条复核 |
 | `1`–`N` | 选择配置中对应的情绪并确认条目 |
 | `X` | 排除当前条目 |
 | `E` | 编辑台词 |
@@ -202,6 +265,8 @@ voice-dataset review $workspace
 | `R` | 刷新当前条目 |
 | `B` | 撤销上一次操作 |
 | `Q` | 保存并退出 |
+
+界面会显示前后相邻台词。`M` 使用规范化源音频从当前起点到下一条终点重新物化 WAV，旧 WAV 不删除；合并后应重新执行 `quality` 和 `transcribe`，再继续导出。
 
 实现应在每次决定后原子写入本地 JSON 状态，至少保留处理顺序、当前位置、最新决定和撤销历史。`Ctrl+C`、终端关闭或播放器异常不应丢失此前决定；再次运行 `review` 会从断点继续。
 
@@ -271,7 +336,82 @@ voice-dataset train $workspace rvc
 voice-dataset train $workspace rvc --execute
 ```
 
-成功标准不是只生成 `.index`。必须存在对应的可推理 `.pth` 权重，才能把 GPT-SoVITS 结果送入 RVC 后处理。本项目负责训练和校验该后处理模型，不包含 RVC 推理；实际转换参数与 checkpoint 对比请在 RVC 上游工具中完成。
+成功标准不是只生成 `.index`。必须存在对应的可推理 `.pth` 权重，才能把 GPT-SoVITS 结果送入 RVC 后处理。RVC 与 GPT-SoVITS 必须使用各自独立 Python 环境；合成和后处理分别由其注册解释器中的隔离 worker 完成。
+
+## 9. 模型注册、情绪规划和直接合成
+
+训练成功时可自动登记 GPT/SoVITS 权重：
+
+```powershell
+voice-dataset train $workspace gpt-sovits `
+  --execute `
+  --register-as character_a `
+  --activate
+```
+
+也可登记已有权重：
+
+```powershell
+voice-dataset model register $workspace `
+  --name character_a `
+  --persona character_a `
+  --repository 'D:\GPT-SoVITS' `
+  --python 'D:\GPT-SoVITS\.venv\Scripts\python.exe' `
+  --gpt 'D:\weights\character-a.ckpt' `
+  --sovits 'D:\weights\character-a.pth' `
+  --manifest 'D:\dataset\manifest.jsonl' `
+  --version v2ProPlus `
+  --activate
+
+voice-dataset model list $workspace
+voice-dataset model activate $workspace character_a
+```
+
+目标文本先转换为统一的 `emotion/intensity/pace/pitch/energy/pause_style` 情绪计划。默认规则分析完全离线。启用兼容网关时必须同时设置 `emotion.provider="openai-compatible"`、实际服务的 `base_url`、该服务可用的 `model`，Token 仍只从独立 secrets 查找；模板中的 `example.invalid` 和 `replace-with-model-id` 是防误调用占位符：
+
+```powershell
+voice-dataset emotion $workspace --text '太好了，终于等到你了！'
+```
+
+不传参考音频时，参考选择器从注册模型的 reviewed manifest 中优先选择同情绪、3–10 秒、已人工确认的片段；传入显式参考时必须同时给出逐字一致的参考台词：
+
+```powershell
+voice-dataset synthesize $workspace `
+  --text '你好，很高兴见到你。' `
+  --output 'D:\output\character-a.wav'
+
+voice-dataset synthesize $workspace `
+  --model character_a `
+  --text '你好，很高兴见到你。' `
+  --emotion happy `
+  --intensity 0.7 `
+  --reference 'D:\reference\happy.wav' `
+  --reference-text '参考音频中实际说出的台词。' `
+  --output 'D:\output\character-a-explicit.wav'
+```
+
+模型记录中的 `--python` 是推理环境接口的一部分，不是可选提示。工具通过该解释器启动 worker，再由 worker 在 GPT-SoVITS 仓库中调用 `TTS_Config/TTS.run`；因此不要求 WebUI 或 API 服务常驻，也不会把上游 PyTorch/音频依赖导入主管线进程。旧注册记录如果没有 `python` 字段，需要使用 `model register ... --python <解释器>` 重新登记。
+
+provider worker 由绝对脚本路径启动，入口只依赖 Python 3.10 标准库；PyTorch、NumPy
+与上游包只在 provider 进程内加载。每次登记都会封存 GPT/SoVITS/reference manifest、
+BERT/CNHubERT、G2PW、语言检测、SV/版本相关声码器，以及可选 RVC
+模型/index/HuBERT/RMVPE 的 SHA-256；同时记录 provider Git HEAD、tracked dirty
+fingerprint 和仓库内 Python 源码树摘要。自动挑选参考 WAV 时还会核对 manifest 行内的音频
+SHA-256。上述输入发生漂移时推理会 fail-closed；旧注册记录必须重新执行 `model register`，
+不要手工补写摘要。
+
+### 可选 RVC 后处理
+
+登记模型时追加 `--rvc-repository/--rvc-python/--rvc-model/--rvc-index` 后，可执行：
+
+```powershell
+voice-dataset synthesize $workspace `
+  --text '固定的 A/B 测试台词。' `
+  --postprocess rvc `
+  --output 'D:\output\character-a-rvc.wav'
+```
+
+原始结果保存为 `character-a-rvc.sovits.wav`。只有 RVC 版本的 ASR 一致性、声学指标、音色相似度和人工 A/B 均胜出时才采用；VC 不是必然增强步骤。
 
 ## 成本与副作用边界
 
@@ -281,11 +421,16 @@ voice-dataset train $workspace rvc --execute
 | `ingest` | 否 | 否 | 来源清单、规范化媒体 |
 | `split --backend energy` | 否 | 否 | 边界、切片 |
 | `split --backend gemini` | 是 | 否 | 边界、切片 |
+| `preprocess` | Gemini 视觉回退时联网；ASR 模型可能首次下载 | 否 | 来源、边界、切片、质量与可选 ASR |
+| `transcribe` | 本地模型可能首次下载 | 否 | ASR 清单 |
+| `quality` | 否 | 否 | 质量清单 |
 | `label` | 是 | 否 | 候选标签 |
 | `review` | 否 | 否 | 人工复核状态 |
 | `export` | 否 | 否 | 训练集 |
 | `train ...` | 否 | 否 | 目标 Python 依赖预检、暂存数据、生成配置、训练计划；RVC 外部实验目录 |
 | `train ... --execute` | 取决于上游 | 是 | 外部实验与模型产物 |
+| `emotion` | 仅 openai-compatible | 否 | 只输出情绪计划 |
+| `synthesize` | rules/显式 emotion 时否；openai-compatible 自动情绪时是 | 否 | 角色 WAV 与可选 VC WAV |
 
 任何高成本行为都必须来自清楚、独立的用户命令。检查状态和打开 TUI 不会隐式触发 Gemini 或训练；重新生成训练计划会重复预检，但不会启动模型训练。
 
@@ -314,7 +459,8 @@ voice-dataset <子命令> --help
 可用子命令：
 
 ```text
-init  ingest  split  label  review  export  train  status
+init  ingest  split  preprocess  transcribe  quality  label  review  export
+train  model  emotion  synthesize  status
 ```
 
 `--help`、`--version` 不写入工作区，不调用网络，也不会启动训练。
@@ -597,6 +743,10 @@ voice-dataset label `
 voice-dataset label $workspace --provider gemini --language zh
 ```
 
+SenseVoice 自动写入的草稿会被视为待处理候选：普通 `label` 会用 Gemini
+结果升级这些 provisional seed，但不会覆盖已有的 Gemini/人工标签。
+`--force` 才会重新调用并覆盖所有候选。
+
 先标注 20 条检查效果：
 
 ```powershell
@@ -655,6 +805,7 @@ voice-dataset review `
 | 按键 | 操作 |
 | --- | --- |
 | `0` | 播放当前音频 |
+| `M` | 与下一片段合并；随后重跑质量与 ASR |
 | `1`–`N` | 选择对应情绪并确认 |
 | `X` | 排除 |
 | `E` | 编辑台词 |
@@ -771,7 +922,9 @@ voice-dataset train `
   gpt-sovits|rvc `
   [--config <project-config.toml>] `
   [--dataset <dataset-directory>] `
-  [--execute]
+  [--execute] `
+  [--register-as <model-name>] `
+  [--activate]
 ```
 
 参数：
@@ -782,6 +935,8 @@ voice-dataset train `
 | `rvc` | 生成或执行 RVC 预处理、F0、HuBERT、训练和索引计划 |
 | `--dataset` | 指定某个 `dataset-<fingerprint>`；省略时选择最新有效导出 |
 | `--execute` | 真正执行外部预处理和训练 |
+| `--register-as` | GPT-SoVITS 成功后把产物登记为角色模型 |
+| `--activate` | 与 `--register-as` 同用，将该模型设为默认 |
 
 只生成 GPT-SoVITS 计划：
 

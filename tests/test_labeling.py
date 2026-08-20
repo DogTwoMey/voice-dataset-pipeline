@@ -118,3 +118,37 @@ def test_label_clips_persists_each_success_and_resumes_after_failure(
     ]
     assert final[0].model == "fake"
     assert final[1].model == "fake-resume"
+
+
+def test_label_clips_upgrades_provisional_sensevoice_seed_without_force(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.create(tmp_path / "workspace")
+    clip = _clip(tmp_path, 3)
+    workspace.write_jsonl(workspace.paths.clips_jsonl, [clip])
+    workspace.write_jsonl(
+        workspace.paths.labels_jsonl,
+        [
+            LabelRecord(
+                clip_id=clip.clip_id,
+                transcript="ASR draft",
+                model="iic/SenseVoiceSmall",
+                rationale="local SenseVoice seed; requires review",
+            )
+        ],
+    )
+    labeler = _RecordingLabeler()
+
+    summary = label_clips(
+        workspace,
+        labeler,
+        emotions=["neutral", "happy"],
+        clusters=["cluster_a", "cluster_b", "unknown"],
+        language_hint="zh",
+    )
+
+    assert summary.labelled == 1
+    assert summary.skipped == 0
+    final = workspace.read_jsonl(workspace.paths.labels_jsonl, LabelRecord)
+    assert len(final) == 1
+    assert final[0].model == "fake-resume"

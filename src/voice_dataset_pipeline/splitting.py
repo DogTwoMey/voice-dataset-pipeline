@@ -320,6 +320,7 @@ def materialize_clips(
                     audio_path=destination,
                     start_ms=round(start * 1_000 / sample_rate),
                     end_ms=round(end * 1_000 / sample_rate),
+                    text=segment.text_hint,
                     sample_rate=info.samplerate,
                     frames=info.frames,
                     sha256=sha256_file(destination),

@@ -11,7 +11,18 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .models import ClipRecord, LabelRecord, ReviewDecision, ReviewState
+from .models import (
+    ASRRecord,
+    ClipRecord,
+    LabelRecord,
+    QualityRecord,
+    ReviewDecision,
+    ReviewMergeReceipt,
+    ReviewState,
+    Segment,
+    SourceRecord,
+)
+from .splitting import materialize_clips
 from .workspace import Workspace
 
 KeyReader = Callable[[], str]
@@ -105,6 +116,180 @@ def _clear() -> None:
     os.system("cls" if os.name == "nt" else "clear")  # noqa: S605
 
 
+def _joined_text(left: str, right: str) -> str:
+    first = left.strip()
+    second = right.strip()
+    if not first:
+        return second
+    if not second:
+        return first
+    separator = " " if first[-1].isascii() and second[0].isascii() else ""
+    return first + separator + second
+
+
+def _active_timeline_pair(
+    clips: Sequence[ClipRecord], left_id: str, right_id: str
+) -> tuple[ClipRecord, ClipRecord]:
+    """Resolve and validate one merge pair from the canonical active manifest."""
+
+    if left_id == right_id:
+        raise ValueError("a clip cannot be merged with itself")
+    active_by_id: dict[str, ClipRecord] = {}
+    for clip in clips:
+        if clip.clip_id in active_by_id:
+            raise ValueError(f"active clip manifest contains duplicate clip_id: {clip.clip_id}")
+        active_by_id[clip.clip_id] = clip
+    if left_id not in active_by_id or right_id not in active_by_id:
+        raise ValueError("both clips must be present in the canonical active manifest")
+
+    left = active_by_id[left_id]
+    right = active_by_id[right_id]
+    if left.source_id != right.source_id:
+        raise ValueError("only clips from the same source can be merged")
+
+    timeline = sorted(
+        (clip for clip in clips if clip.source_id == left.source_id),
+        key=lambda clip: (clip.start_ms, clip.end_ms, clip.clip_id),
+    )
+    left_index = next(index for index, clip in enumerate(timeline) if clip.clip_id == left.clip_id)
+    if left_index + 1 >= len(timeline) or timeline[left_index + 1].clip_id != right.clip_id:
+        raise ValueError("clips must be direct timeline neighbors in the canonical active manifest")
+    if right.start_ms < left.end_ms:
+        raise ValueError("overlapping clips cannot be merged")
+
+    for clip in timeline:
+        if clip.clip_id in {left.clip_id, right.clip_id}:
+            continue
+        if clip.start_ms < right.end_ms and clip.end_ms > left.start_ms:
+            raise ValueError("merge span overlaps another active clip")
+    return left, right
+
+
+def merge_adjacent_clips(
+    workspace: Workspace,
+    left: ClipRecord,
+    right: ClipRecord,
+    *,
+    transcript: str,
+    emotion: str,
+    cluster: str,
+) -> tuple[ClipRecord, LabelRecord]:
+    """Create a new immutable clip spanning an adjacent pair; old WAVs remain."""
+
+    sources = workspace.read_jsonl(workspace.paths.sources_jsonl, SourceRecord)
+    segments = workspace.read_jsonl(workspace.paths.segments_jsonl, Segment)
+    clips = workspace.read_jsonl(workspace.paths.clips_jsonl, ClipRecord)
+    assert isinstance(sources, list)
+    assert isinstance(segments, list)
+    assert isinstance(clips, list)
+    left, right = _active_timeline_pair(clips, left.clip_id, right.clip_id)
+    review_state = workspace.load_review().model_copy(deep=True)
+    pair_index: int | None = None
+    if review_state.order:
+        pair_index = next(
+            (
+                index
+                for index in range(len(review_state.order) - 1)
+                if review_state.order[index : index + 2] == [left.clip_id, right.clip_id]
+            ),
+            None,
+        )
+        if pair_index is None:
+            raise ValueError("review state does not contain the adjacent clips to merge")
+    source = next((row for row in sources if row.source_id == left.source_id), None)
+    if source is None:
+        raise ValueError(f"source is missing for merge: {left.source_id}")
+    merged_segment = Segment(
+        source_id=left.source_id,
+        start_seconds=left.start_seconds,
+        end_seconds=right.end_seconds,
+        text_hint=transcript,
+        provenance={
+            "strategy": "manual_merge",
+            "left_clip_id": left.clip_id,
+            "right_clip_id": right.clip_id,
+        },
+    )
+    merged = materialize_clips(
+        source.normalized_path,
+        [merged_segment],
+        workspace.paths.clips,
+        source_id=left.source_id,
+    )[0].model_copy(update={"text": transcript, "emotion": emotion, "cluster": cluster})
+    replacement: list[ClipRecord] = []
+    inserted = False
+    for clip in clips:
+        if clip.clip_id in {left.clip_id, right.clip_id}:
+            if not inserted:
+                replacement.append(merged)
+                inserted = True
+            continue
+        replacement.append(clip)
+    if not inserted:  # guarded by _active_timeline_pair; retain a defensive assertion
+        raise AssertionError("validated merge pair disappeared from the active manifest")
+    remaining_segments = [
+        row
+        for row in segments
+        if not (
+            row.source_id == left.source_id
+            and round(row.start_seconds * 1_000) in {left.start_ms, right.start_ms}
+            and round(row.end_seconds * 1_000) in {left.end_ms, right.end_ms}
+        )
+    ]
+    projections: dict[Path, list[QualityRecord] | list[ASRRecord]] = {}
+    for path, model in (
+        (workspace.paths.quality_jsonl, QualityRecord),
+        (workspace.paths.asr_jsonl, ASRRecord),
+    ):
+        records = workspace.read_jsonl(path, model)
+        assert isinstance(records, list)
+        projections[path] = [
+            row for row in records if row.clip_id not in {left.clip_id, right.clip_id}
+        ]
+    labels = workspace.read_jsonl(workspace.paths.labels_jsonl, LabelRecord)
+    assert isinstance(labels, list)
+    label = LabelRecord(
+        clip_id=merged.clip_id,
+        transcript=transcript,
+        emotion=emotion,
+        cluster=cluster,
+        rationale="manual merge; rerun quality and SenseVoice before export",
+        model="manual-merge",
+    )
+    replacement_labels = [
+        row for row in labels if row.clip_id not in {left.clip_id, right.clip_id}
+    ] + [label]
+    if review_state.order:
+        assert pair_index is not None
+        review_state.order[pair_index : pair_index + 2] = [merged.clip_id]
+    else:
+        review_state.order = [row.clip_id for row in replacement]
+    review_state.decisions.pop(left.clip_id, None)
+    review_state.decisions.pop(right.clip_id, None)
+    review_state.decisions[merged.clip_id] = ReviewDecision(
+        clip_id=merged.clip_id,
+        emotion=label.emotion,
+        cluster=label.cluster,
+        transcript=label.transcript,
+    )
+    review_state.cursor = min(review_state.cursor, len(review_state.order))
+    review_state.history.clear()
+    workspace.commit_review_merge(
+        ReviewMergeReceipt(
+            left_clip_id=left.clip_id,
+            right_clip_id=right.clip_id,
+            merged_clip_id=merged.clip_id,
+            clips=replacement,
+            segments=[*remaining_segments, merged_segment],
+            labels=replacement_labels,
+            quality=list(projections[workspace.paths.quality_jsonl]),
+            asr=list(projections[workspace.paths.asr_jsonl]),
+            review_state=review_state,
+        )
+    )
+    return merged, label
+
+
 def _draw(
     *,
     state: ReviewState,
@@ -112,6 +297,8 @@ def _draw(
     label: LabelRecord | None,
     decision: ReviewDecision,
     emotions: Sequence[str],
+    previous_text: str = "",
+    next_text: str = "",
 ) -> None:
     width = min(120, max(80, shutil.get_terminal_size((100, 24)).columns))
     bar = "=" * width
@@ -124,13 +311,17 @@ def _draw(
     print(f"Emotion: {decision.emotion}  Cluster: {decision.cluster}")
     print("-" * width)
     print(decision.transcript or "(no transcript)")
+    if previous_text:
+        print(f"[Previous] {previous_text}")
+    if next_text:
+        print(f"[Next] {next_text}")
     print("-" * width)
     options = "  ".join(f"[{index}] {emotion}" for index, emotion in enumerate(emotions, 1))
     print(options)
-    print("[0] Play  [X] Exclude  [E] Edit text  [K] Edit cluster  [R] Refresh")
+    print("[0] Play  [M] Merge next  [X] Exclude  [E] Edit text  [K] Edit cluster  [R] Refresh")
     print("[S] Skip to end  [B] Undo last  [Q] Save and quit")
     if label and label.rationale:
-        print(f"Gemini: {label.rationale}")
+        print(f"Hint: {label.rationale}")
     print(bar)
     print("Key: ", end="", flush=True)
 
@@ -148,6 +339,7 @@ def review_workspace(
     choices = [item.strip() for item in emotions if item.strip()]
     if not choices or len(choices) > 9:
         raise ValueError("review emotions must contain between 1 and 9 entries")
+    workspace.recover_review_merge()
     clips = workspace.read_jsonl(workspace.paths.clips_jsonl, ClipRecord)
     labels = workspace.read_jsonl(workspace.paths.labels_jsonl, LabelRecord)
     assert isinstance(clips, list)
@@ -176,6 +368,23 @@ def review_workspace(
             label = label_by_id.get(clip_id)
             current = state.decisions.get(clip_id)
             shown = _fallback_decision(clip, label, current)
+            context: list[str] = []
+            for offset in (-1, 1):
+                index = state.cursor + offset
+                if not 0 <= index < len(state.order):
+                    context.append("")
+                    continue
+                neighbour_id = state.order[index]
+                neighbour_clip = clip_by_id[neighbour_id]
+                neighbour_label = label_by_id.get(neighbour_id)
+                neighbour_decision = state.decisions.get(neighbour_id)
+                context.append(
+                    _fallback_decision(
+                        neighbour_clip,
+                        neighbour_label,
+                        neighbour_decision,
+                    ).transcript
+                )
             if clear_screen:
                 _clear()
             _draw(
@@ -184,6 +393,8 @@ def review_workspace(
                 label=label,
                 decision=shown,
                 emotions=choices,
+                previous_text=context[0],
+                next_text=context[1],
             )
             key = key_reader()
             print(key)
@@ -221,6 +432,29 @@ def review_workspace(
                 skipped = state.order.pop(state.cursor)
                 state.order.append(skipped)
                 workspace.save_review(state)
+            elif lowered == "m":
+                if state.cursor + 1 >= len(state.order):
+                    continue
+                right_id = state.order[state.cursor + 1]
+                right_clip = clip_by_id[right_id]
+                right_label = label_by_id.get(right_id)
+                right_decision = state.decisions.get(right_id)
+                right_shown = _fallback_decision(right_clip, right_label, right_decision)
+                merged, merged_label = merge_adjacent_clips(
+                    workspace,
+                    clip,
+                    right_clip,
+                    transcript=_joined_text(shown.transcript, right_shown.transcript),
+                    emotion=shown.emotion,
+                    cluster=shown.cluster,
+                )
+                clip_by_id.pop(clip_id, None)
+                clip_by_id.pop(right_id, None)
+                clip_by_id[merged.clip_id] = merged
+                label_by_id.pop(clip_id, None)
+                label_by_id.pop(right_id, None)
+                label_by_id[merged.clip_id] = merged_label
+                state = workspace.load_review()
             elif lowered == "b":
                 _undo(state)
                 workspace.save_review(state)

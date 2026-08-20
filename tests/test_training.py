@@ -74,6 +74,8 @@ def _gpt_repository(root: Path) -> Path:
         _file(root / relative)
     _file(root / "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large/config.json")
     _file(root / "GPT_SoVITS/pretrained_models/chinese-hubert-base/config.json")
+    _file(root / "GPT_SoVITS/text/G2PWModel/g2pW.onnx")
+    _file(root / "GPT_SoVITS/pretrained_models/fast_langdetect/lid.176.bin")
     return root
 
 

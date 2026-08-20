@@ -15,7 +15,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from .models import ReviewState
+from .models import ReviewMergeReceipt, ReviewState
 
 RecordT = TypeVar("RecordT", bound=BaseModel)
 _WRITE_LOCK = threading.RLock()
@@ -33,7 +33,10 @@ class WorkspacePaths:
     segments_jsonl: Path
     clips_jsonl: Path
     labels_jsonl: Path
+    quality_jsonl: Path
+    asr_jsonl: Path
     review_json: Path
+    pending_review_merge_json: Path
 
     @classmethod
     def under(cls, root: Path) -> WorkspacePaths:
@@ -50,7 +53,10 @@ class WorkspacePaths:
             segments_jsonl=manifests / "segments.jsonl",
             clips_jsonl=manifests / "clips.jsonl",
             labels_jsonl=manifests / "labels.jsonl",
+            quality_jsonl=manifests / "quality.jsonl",
+            asr_jsonl=manifests / "asr.jsonl",
             review_json=state / "review.json",
+            pending_review_merge_json=state / "pending-review-merge.json",
         )
 
 
@@ -220,3 +226,36 @@ class Workspace:
         with _WRITE_LOCK:
             _atomic_replace(self.paths.review_json, payload)
         return self.paths.review_json
+
+    def commit_review_merge(self, receipt: ReviewMergeReceipt) -> None:
+        """Persist a redo receipt, then apply every merge projection atomically per file."""
+
+        payload = _json_bytes(receipt.model_dump(mode="json"), pretty=True)
+        with _WRITE_LOCK:
+            _atomic_replace(self.paths.pending_review_merge_json, payload)
+            self._apply_review_merge(receipt)
+
+    def recover_review_merge(self) -> bool:
+        """Idempotently finish a merge whose durable receipt survived a crash."""
+
+        with _WRITE_LOCK:
+            if not self.paths.pending_review_merge_json.exists():
+                return False
+            try:
+                raw = json.loads(self.paths.pending_review_merge_json.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"invalid pending review merge {self.paths.pending_review_merge_json}: {exc}"
+                ) from exc
+            receipt = ReviewMergeReceipt.model_validate(raw)
+            self._apply_review_merge(receipt)
+            return True
+
+    def _apply_review_merge(self, receipt: ReviewMergeReceipt) -> None:
+        self.write_jsonl(self.paths.clips_jsonl, receipt.clips)
+        self.write_jsonl(self.paths.segments_jsonl, receipt.segments)
+        self.write_jsonl(self.paths.quality_jsonl, receipt.quality)
+        self.write_jsonl(self.paths.asr_jsonl, receipt.asr)
+        self.write_jsonl(self.paths.labels_jsonl, receipt.labels)
+        self.save_review(receipt.review_state)
+        self.paths.pending_review_merge_json.unlink(missing_ok=True)
