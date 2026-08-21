@@ -41,6 +41,7 @@ all = [
 
 [project.scripts]
 voice-dataset = "voice_dataset_pipeline.cli:main"
+voice-bundle = "voice_dataset_pipeline.voice_bundle:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "default": "neutral",
+  "items": {
+    "neutral": {
+      "description": "中性、清晰、适合日常回复",
+      "auto_enabled": true,
+      "audio_path": "D:/voice-assets/references/neutral.wav",
+      "prompt_text": "这里填写与参考音频逐字一致的单行文本。",
+      "prompt_lang": "zh"
+    },
+    "happy": {
+      "description": "明快但不过度夸张",
+      "auto_enabled": true,
+      "audio_path": "D:/voice-assets/references/happy.wav",
+      "prompt_text": "这里填写开心参考音频的准确文本。",
+      "prompt_lang": "zh"
+    }
+  }
+}
+
+

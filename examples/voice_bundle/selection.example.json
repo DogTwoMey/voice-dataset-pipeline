@@ -1,0 +1,12 @@
+{
+  "method": "人工盲听与固定参数评估",
+  "training_plan_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+  "evaluation_fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+  "selected": {
+    "gpt_path": "D:/voice-workspace/training/gpt_sovits/character_v1/weights/gpt/character_v1-e6.ckpt",
+    "gpt_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "sovits_path": "D:/voice-workspace/training/gpt_sovits/character_v1/weights/sovits/character_v1_e4_s140.pth",
+    "sovits_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}
+
