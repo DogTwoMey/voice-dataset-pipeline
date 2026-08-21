@@ -14,7 +14,7 @@
     -> train rvc / RVC 后处理
     -> model register / activate
     -> emotion -> reference selection -> synthesize
-    -> optional RVC postprocess
+    -> optional RVC conversion -> optional SoX scene mastering
 ```
 
 快速导航：
@@ -373,7 +373,7 @@ voice-dataset model activate $workspace character_a
 voice-dataset emotion $workspace --text '太好了，终于等到你了！'
 ```
 
-不传参考音频时，参考选择器从注册模型的 reviewed manifest 中优先选择同情绪、3–10 秒、已人工确认的片段；传入显式参考时必须同时给出逐字一致的参考台词：
+不传参考音频时，参考选择器从注册模型的 reviewed manifest 中优先选择同情绪、3–10 秒、已人工确认的片段。若同一情绪中已通过固定台词 A/B 找到稳定参考，可在 `[reference.preferred_clip_ids]` 中按情绪固定 manifest 的 `clip_id`；配置的条目缺失或不可用时会直接报错，不会静默换用别的参考。传入显式参考时必须同时给出逐字一致的参考台词：
 
 ```powershell
 voice-dataset synthesize $workspace `
@@ -389,6 +389,29 @@ voice-dataset synthesize $workspace `
   --reference-text '参考音频中实际说出的台词。' `
   --output 'D:\output\character-a-explicit.wav'
 ```
+
+推理切句由非敏感配置控制：
+
+```toml
+[inference]
+text_split_method = "cut0"
+fragment_interval = 0.3
+
+[inference.emotion_overrides.neutral]
+top_k = 20
+top_p = 0.96
+temperature = 1.0
+pace = 1.04
+```
+
+`cut0` 不预拆目标文本，适合常见的单句/短段角色台词，也是默认值。`cut5` 会在每个标点
+处创建独立 GPT-SoVITS 片段，并在片段间加入 `fragment_interval` 静音；它只适合明确需要
+硬分段的旧工作流，不应用来修饰自然停顿。较长文本可测试 `cut2`。上游中文前端会把
+人名中的 `·` 规范化为逗号，要求姓名连读时应写成不带连接号的形式。
+
+`emotion_overrides` 是角色配置，不是通用推荐值。它只覆盖命中的情绪计划，未配置的情绪
+继续使用分析器默认值。应固定权重、台词、参考音频和 seed 做 A/B 后再填写；字段范围仍由
+`EmotionPlan` 校验，非法数值会在推理前直接拒绝。
 
 模型记录中的 `--python` 是推理环境接口的一部分，不是可选提示。工具通过该解释器启动 worker，再由 worker 在 GPT-SoVITS 仓库中调用 `TTS_Config/TTS.run`；因此不要求 WebUI 或 API 服务常驻，也不会把上游 PyTorch/音频依赖导入主管线进程。旧注册记录如果没有 `python` 字段，需要使用 `model register ... --python <解释器>` 重新登记。
 
@@ -413,6 +436,61 @@ voice-dataset synthesize $workspace `
 
 原始结果保存为 `character-a-rvc.sovits.wav`。只有 RVC 版本的 ASR 一致性、声学指标、音色相似度和人工 A/B 均胜出时才采用；VC 不是必然增强步骤。
 
+### 场景化合成与 SoX 母带
+
+场景是贯穿合成的一级参数。`speech`、`singing`、`audiobook`、`asmr`、`stage`
+会同时调整有效的 `pace/top_k/top_p/temperature`、参考 cluster 偏好和对应的 SoX profile；
+当前 GPT-SoVITS provider 不消费 `pitch/energy/pause_style`，因此工具不会声称这些元数据已经
+控制上游音高或力度。
+
+安装维护中的 SoX_ng 后，把二进制绝对路径写入非敏感项目配置：
+
+```toml
+[scenes]
+default = "speech"
+
+[postprocess.sox]
+enabled = true
+binary = "D:/Tools/sox_ng-14.8.0.1/sox_ng.exe"
+output_bits = 16
+```
+
+单场景：
+
+```powershell
+voice-dataset synthesize $workspace `
+  --text '固定的 A/B 测试台词。' `
+  --scene asmr `
+  --mastering auto `
+  --output 'D:\output\character-asmr.wav'
+```
+
+一次生成五种场景：
+
+```powershell
+voice-dataset synthesize $workspace `
+  --text '固定的 A/B 测试台词。' `
+  --scene all `
+  --mastering sox `
+  --seed 2333 `
+  --output 'D:\output\character.wav'
+```
+
+多场景输出固定为 `character.<scene>.wav`；同一 seed 会贯穿整个批次。显式参考音频会覆盖
+所有场景的自动参考策略。`--mastering none` 可随时关闭 SoX；`--mastering-profile` 只用于
+单场景诊断性覆盖。SoX profile 不执行 trim、fade、noisered、reverb、pitch 或 tempo，避免
+重新制造截句、破坏气声或把朗读伪装成歌唱。峰值整理不是 LUFS 标准化，仍应结合 ASR、
+削波/真峰值、时长和盲听 A/B 门禁决定是否采用。
+
+四种组合的文件语义：
+
+| RVC | SoX | 文件 |
+| --- | --- | --- |
+| 否 | 否 | 用户输出即 SoVITS |
+| 否 | 是 | 保留 `*.sovits.wav`，用户输出为 SoX |
+| 是 | 否 | 保留 `*.sovits.wav`，用户输出为 RVC |
+| 是 | 是 | 保留 `*.sovits.wav`、`*.rvc.wav`，用户输出为 SoX(RVC) |
+
 ## 成本与副作用边界
 
 | 操作 | 网络/API | 是否启动训练 | 主要写入 |
@@ -430,7 +508,7 @@ voice-dataset synthesize $workspace `
 | `train ...` | 否 | 否 | 目标 Python 依赖预检、暂存数据、生成配置、训练计划；RVC 外部实验目录 |
 | `train ... --execute` | 取决于上游 | 是 | 外部实验与模型产物 |
 | `emotion` | 仅 openai-compatible | 否 | 只输出情绪计划 |
-| `synthesize` | rules/显式 emotion 时否；openai-compatible 自动情绪时是 | 否 | 角色 WAV 与可选 VC WAV |
+| `synthesize` | rules/显式 emotion 时否；openai-compatible 自动情绪时是 | 否 | 角色 WAV、可选 VC 中间产物与 SoX 母带 WAV |
 
 任何高成本行为都必须来自清楚、独立的用户命令。检查状态和打开 TUI 不会隐式触发 Gemini 或训练；重新生成训练计划会重复预检，但不会启动模型训练。
 

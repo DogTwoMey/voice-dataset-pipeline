@@ -68,12 +68,28 @@ api_key_env = "OPENAI_COMPAT_API_KEY"
 preferred_min_seconds = 3.0
 preferred_max_seconds = 9.0
 
+# Fill these only after exporting and objectively checking the references.
+# [reference.preferred_clip_ids]
+# neutral = "reviewed-clip-id"
+
+# [reference.scene_preferred_clip_ids.asmr]
+# neutral = "reviewed-whisper-clip-id"
+
 [inference]
 default_model = "dracaene_v3_hq"
 device = "cuda"
 half = true
 language = "zh"
 seed = 2333
+text_split_method = "cut0"
+fragment_interval = 0.3
+
+# Example only: replace with values selected for the registered checkpoints.
+# [inference.emotion_overrides.neutral]
+# top_k = 20
+# top_p = 0.96
+# temperature = 1.0
+# pace = 1.04
 
 [training]
 enabled = true
@@ -117,6 +133,9 @@ save_every = 20
 preprocess_seconds = 3.7
 half = true
 
+[scenes]
+default = "speech"
+
 [postprocess]
 enabled = false
 backend = "rvc"
@@ -125,3 +144,8 @@ transpose = 0
 index_rate = 0.35
 rms_mix_rate = 0.2
 protect = 0.4
+
+[postprocess.sox]
+enabled = false
+binary = "sox"
+output_bits = 16

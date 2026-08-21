@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "attestation_id": "character-voice-local-2026-001",
+  "subject": "角色或声音主体名称",
+  "dataset_fingerprint": "7777777777777777777777777777777777777777777777777777777777777777",
+  "training_plan_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+  "rights_basis": "explicit_permission",
+  "rights_holder": "权利人或获授权主体",
+  "evidence_reference": "private://rights/character-voice-local-2026-001",
+  "voice_subject_authorization": "explicit_permission",
+  "training_allowed": true,
+  "local_inference_allowed": true,
+  "model_distribution_allowed": false,
+  "reference_audio_distribution_allowed": false,
+  "source_dataset_distribution_allowed": false,
+  "attested_by": "声明人",
+  "attested_at": "2026-08-21T12:00:00+08:00"
+}

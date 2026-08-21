@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from voice_dataset_pipeline.cli import main
 from voice_dataset_pipeline.config import (
+    InferenceConfig,
     config_layout,
     generate_default_config_layout,
     load_config,
@@ -14,6 +15,7 @@ from voice_dataset_pipeline.config import (
     write_secrets_gitignore,
 )
 from voice_dataset_pipeline.models import ReviewDecision, ReviewState
+from voice_dataset_pipeline.scenes import SceneName
 from voice_dataset_pipeline.workspace import Workspace
 
 
@@ -135,3 +137,17 @@ def test_repository_project_and_secret_examples_remain_valid():
 
     assert project.gemini.api_key_env == "GEMINI_API_KEY"
     assert secrets.get("GEMINI_API_KEY") is None
+    assert project.scenes.default == SceneName.SPEECH
+    assert project.postprocess.sox.enabled is False
+    assert load_config(root / "examples/project/dracaene.toml").scenes.default == SceneName.SPEECH
+
+
+def test_inference_emotion_overrides_are_validated() -> None:
+    config = InferenceConfig.model_validate(
+        {"emotion_overrides": {"neutral": {"top_k": 20, "top_p": 0.96, "pace": 1.04}}}
+    )
+
+    assert config.emotion_overrides["neutral"].top_k == 20
+    assert config.emotion_overrides["neutral"].pace == 1.04
+    with pytest.raises(ValidationError, match="less than or equal to 2"):
+        InferenceConfig.model_validate({"emotion_overrides": {"neutral": {"temperature": 3}}})

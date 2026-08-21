@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 
 from .models import InputMode, SplitBackend, StrictModel
+from .scenes import SceneName
 
 DEFAULT_CONFIG = r"""
 [media]
@@ -98,15 +99,35 @@ timeout_seconds = 60.0
 preferred_min_seconds = 3.0
 preferred_max_seconds = 10.0
 
+# Optional deterministic pins from the reviewed export manifest.
+# [reference.preferred_clip_ids]
+# neutral = "reviewed-clip-id"
+
+# Optional scene-specific pins take precedence over the emotion-only pins.
+# [reference.scene_preferred_clip_ids.asmr]
+# neutral = "reviewed-whisper-clip-id"
+
 [inference]
 default_model = ""
 device = "cuda"
 half = true
 language = "zh"
 seed = -1
+text_split_method = "cut0"
+fragment_interval = 0.3
+
+# Optional persona-specific sampling values selected by fixed-probe A/B tests.
+# [inference.emotion_overrides.neutral]
+# top_k = 20
+# top_p = 0.96
+# temperature = 1.0
+# pace = 1.04
 
 [registry]
 path = "models/registry.json"
+
+[scenes]
+default = "speech"
 
 [postprocess]
 enabled = false
@@ -116,6 +137,11 @@ transpose = 0
 index_rate = 0.45
 rms_mix_rate = 0.25
 protect = 0.33
+
+[postprocess.sox]
+enabled = false
+binary = "sox"
+output_bits = 16
 
 [review]
 emotions = ["neutral", "happy", "sad", "angry", "surprised", "fearful", "disgusted", "unknown"]
@@ -310,6 +336,8 @@ class EmotionConfig(StrictModel):
 class ReferenceConfig(StrictModel):
     preferred_min_seconds: float = Field(default=3.0, gt=0)
     preferred_max_seconds: float = Field(default=10.0, gt=0)
+    preferred_clip_ids: dict[str, str] = Field(default_factory=dict)
+    scene_preferred_clip_ids: dict[str, dict[str, str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_range(self) -> ReferenceConfig:
@@ -318,16 +346,36 @@ class ReferenceConfig(StrictModel):
         return self
 
 
+class InferenceSamplingOverride(StrictModel):
+    top_k: int | None = Field(default=None, ge=1, le=100)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    temperature: float | None = Field(default=None, gt=0, le=2)
+    pace: float | None = Field(default=None, ge=0.5, le=2.0)
+
+
 class InferenceConfig(StrictModel):
     default_model: str = ""
     device: str = "cuda"
     half: bool = True
     language: str = "zh"
     seed: int = -1
+    text_split_method: Literal["cut0", "cut1", "cut2", "cut3", "cut4", "cut5"] = "cut0"
+    fragment_interval: float = Field(default=0.3, ge=0, le=2)
+    emotion_overrides: dict[str, InferenceSamplingOverride] = Field(default_factory=dict)
 
 
 class RegistryConfig(StrictModel):
     path: Path = Path("models/registry.json")
+
+
+class ScenesConfig(StrictModel):
+    default: SceneName = SceneName.SPEECH
+
+
+class SoXConfig(StrictModel):
+    enabled: bool = False
+    binary: str = "sox"
+    output_bits: Literal[16, 24] = 16
 
 
 class PostprocessConfig(StrictModel):
@@ -338,6 +386,7 @@ class PostprocessConfig(StrictModel):
     index_rate: float = Field(default=0.45, ge=0, le=1)
     rms_mix_rate: float = Field(default=0.25, ge=0, le=1)
     protect: float = Field(default=0.33, ge=0, le=0.5)
+    sox: SoXConfig = Field(default_factory=SoXConfig)
 
 
 class ReviewConfig(StrictModel):
@@ -400,6 +449,7 @@ class PipelineConfig(StrictModel):
     reference: ReferenceConfig
     inference: InferenceConfig
     registry: RegistryConfig
+    scenes: ScenesConfig
     postprocess: PostprocessConfig
     review: ReviewConfig
     training: TrainingConfig
