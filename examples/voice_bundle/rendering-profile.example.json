@@ -1,0 +1,26 @@
+{
+  "scene_catalog": "vdp-scene-v1",
+  "default_scene": "speech",
+  "supported_scenes": [
+    "speech",
+    "audiobook",
+    "asmr",
+    "stage"
+  ],
+  "scene_reference_profiles": {
+    "asmr": {
+      "neutral": "neutral"
+    },
+    "stage": {
+      "neutral": "happy"
+    }
+  },
+  "profile_sampling_overrides": {
+    "happy": {
+      "top_k": 20,
+      "top_p": 0.8,
+      "temperature": 0.7,
+      "pace": 1.05
+    }
+  }
+}

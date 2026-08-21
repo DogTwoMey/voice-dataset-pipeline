@@ -9,6 +9,7 @@ import pytest
 
 from voice_dataset_pipeline.voice_bundle import (
     BundleBuildRequest,
+    BundleRendering,
     CodeProvenance,
     VoiceBundleError,
     VoiceBundleIntegrityError,
@@ -44,6 +45,7 @@ def _request(
     local_inference_allowed: bool = True,
     rights_dataset_fingerprint: str = "7" * 64,
     rights_training_plan_fingerprint: str = "1" * 64,
+    rendering_profile: dict[str, object] | None = None,
 ) -> BundleBuildRequest:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
@@ -140,6 +142,10 @@ def _request(
             "allow_unreviewed": False,
         },
     )
+    rendering_profile_path: Path | None = None
+    if rendering_profile is not None:
+        rendering_profile_path = inputs / "rendering-profile.json"
+        _write_json(rendering_profile_path, rendering_profile)
     return BundleBuildRequest(
         bundle_id="example.voice.v1",
         display_name="示例角色语音",
@@ -149,6 +155,7 @@ def _request(
         rights_attestation_path=rights,
         training_plan_path=plan,
         dataset_metadata_path=metadata,
+        rendering_profile_path=rendering_profile_path,
         pipeline=CodeProvenance(
             repository="https://github.com/example/voice-dataset-pipeline",
             commit="a" * 40,
@@ -174,6 +181,7 @@ def test_builds_portable_bundle_from_explicit_selection(tmp_path: Path) -> None:
     assert manifest.references.default == "neutral"
     assert manifest.references.items["neutral"].audio == "references/neutral.wav"
     assert manifest.references.items["neutral"].auto_enabled is True
+    assert manifest.rendering is None
     assert manifest.distribution.model_allowed is False
     assert manifest.distribution.reference_audio_allowed is False
     assert manifest.distribution.source_dataset_included is False
@@ -196,6 +204,109 @@ def test_builds_portable_bundle_from_explicit_selection(tmp_path: Path) -> None:
     assert "evidence_reference" not in serialized
     assert "rights_holder" not in serialized
     assert '"subject"' not in serialized
+    assert '"rendering"' not in serialized
+
+
+def _rendering_profile() -> dict[str, object]:
+    return {
+        "scene_catalog": "vdp-scene-v1",
+        "default_scene": "speech",
+        "supported_scenes": ["speech", "audiobook", "asmr", "stage"],
+        "scene_reference_profiles": {
+            "asmr": {"neutral": "neutral"},
+            "stage": {"neutral": "neutral"},
+        },
+        "profile_sampling_overrides": {"neutral": {"top_k": 20}},
+    }
+
+
+def test_rendering_example_matches_strict_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    rendering_payload = json.loads(
+        (root / "examples/voice_bundle/rendering-profile.example.json").read_text(encoding="utf-8")
+    )
+    references_payload = json.loads(
+        (root / "examples/voice_bundle/reference-profile.example.json").read_text(encoding="utf-8")
+    )
+
+    rendering = BundleRendering.model_validate(rendering_payload)
+    profile_names = set(references_payload["items"])
+    for mappings in rendering.scene_reference_profiles.values():
+        assert set(mappings).issubset(profile_names)
+        assert set(mappings.values()).issubset(profile_names)
+    assert set(rendering.profile_sampling_overrides).issubset(profile_names)
+
+
+def test_builds_bundle_with_optional_strict_rendering_contract(tmp_path: Path) -> None:
+    result = build_voice_bundle(_request(tmp_path, rendering_profile=_rendering_profile()))
+
+    manifest = load_voice_bundle(result.manifest_path)
+    assert manifest.rendering is not None
+    assert manifest.rendering.scene_catalog == "vdp-scene-v1"
+    assert manifest.rendering.default_scene == "speech"
+    assert manifest.rendering.supported_scenes == ["speech", "audiobook", "asmr", "stage"]
+    assert manifest.rendering.scene_reference_profiles["asmr"] == {"neutral": "neutral"}
+    override = manifest.rendering.profile_sampling_overrides["neutral"]
+    assert override.top_k == 20
+    assert override.pace is None
+    payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert payload["rendering"]["profile_sampling_overrides"]["neutral"] == {"top_k": 20}
+
+
+def test_rejects_rendering_default_outside_supported_scenes(tmp_path: Path) -> None:
+    rendering = _rendering_profile()
+    rendering["default_scene"] = "singing"
+    request = _request(tmp_path, rendering_profile=rendering)
+
+    with pytest.raises(VoiceBundleError, match="default_scene"):
+        build_voice_bundle(request)
+
+    assert not request.output_dir.exists()
+
+
+def test_rejects_rendering_reference_to_unknown_profile(tmp_path: Path) -> None:
+    rendering = _rendering_profile()
+    rendering["scene_reference_profiles"] = {"asmr": {"neutral": "whisper"}}
+    request = _request(tmp_path, rendering_profile=rendering)
+
+    with pytest.raises(VoiceBundleError, match="目标 profile 不存在"):
+        build_voice_bundle(request)
+
+    assert not request.output_dir.exists()
+
+
+@pytest.mark.parametrize("forbidden_field", ["sox", "binary", "enabled", "effects"])
+def test_rejects_machine_local_or_raw_mastering_fields(
+    tmp_path: Path, forbidden_field: str
+) -> None:
+    rendering = _rendering_profile()
+    rendering[forbidden_field] = True
+    request = _request(tmp_path, rendering_profile=rendering)
+
+    with pytest.raises(VoiceBundleError, match="rendering profile"):
+        build_voice_bundle(request)
+
+    assert not request.output_dir.exists()
+
+
+def test_rejects_incomplete_or_unknown_profile_sampling_override(tmp_path: Path) -> None:
+    rendering = _rendering_profile()
+    rendering["profile_sampling_overrides"] = {"unknown": {}}
+    request = _request(tmp_path, rendering_profile=rendering)
+
+    with pytest.raises(VoiceBundleError, match="至少设置一个采样字段"):
+        build_voice_bundle(request)
+
+    rendering["profile_sampling_overrides"] = {"neutral": {"top_k": None}}
+    assert request.rendering_profile_path is not None
+    _write_json(request.rendering_profile_path, rendering)
+    with pytest.raises(VoiceBundleError, match="不能显式设为 null"):
+        build_voice_bundle(request)
+
+    rendering["profile_sampling_overrides"] = {"unknown": {"top_k": 20}}
+    _write_json(request.rendering_profile_path, rendering)
+    with pytest.raises(VoiceBundleError, match="包含未知 profile"):
+        build_voice_bundle(request)
 
 
 def test_rejects_rights_without_local_inference_authorization(tmp_path: Path) -> None:
@@ -346,6 +457,16 @@ def test_loader_rejects_legacy_version_or_missing_fixed_engine_fields(
         load_voice_bundle(result.manifest_path)
 
 
+def test_loader_rejects_explicit_null_rendering(tmp_path: Path) -> None:
+    result = build_voice_bundle(_request(tmp_path))
+    payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    payload["rendering"] = None
+    _write_json(result.manifest_path, payload)
+
+    with pytest.raises(VoiceBundleIntegrityError, match="rendering 只能省略"):
+        load_voice_bundle(result.manifest_path)
+
+
 def test_schema_and_verify_cli_are_strict(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -365,11 +486,40 @@ def test_schema_and_verify_cli_are_strict(
         "distribution",
         "files",
     }
+    assert "rendering" not in schema["required"]
     assert set(schema["$defs"]["BundleEngine"]["required"]) == {
         "name",
         "api",
         "model_version",
     }
+    rendering_schema = schema["$defs"]["BundleRendering"]
+    assert rendering_schema["additionalProperties"] is False
+    assert set(rendering_schema["required"]) == {
+        "scene_catalog",
+        "default_scene",
+        "supported_scenes",
+        "scene_reference_profiles",
+        "profile_sampling_overrides",
+    }
+    assert set(rendering_schema["properties"]) == {
+        "scene_catalog",
+        "default_scene",
+        "supported_scenes",
+        "scene_reference_profiles",
+        "profile_sampling_overrides",
+    }
+    rendering_property = schema["properties"]["rendering"]
+    assert rendering_property["$ref"] == "#/$defs/BundleRendering"
+    assert "anyOf" not in rendering_property
+    sampling_schema = schema["$defs"]["BundleSamplingOverride"]
+    assert {tuple(option["required"]) for option in sampling_schema["anyOf"]} == {
+        ("top_k",),
+        ("top_p",),
+        ("temperature",),
+        ("pace",),
+    }
+    assert "required" not in sampling_schema
+    assert all("anyOf" not in field for field in sampling_schema["properties"].values())
     schema_path = Path(__file__).resolve().parents[1] / "schemas" / "voice-bundle.schema.json"
     assert json.loads(schema_path.read_text(encoding="utf-8")) == schema
     assert main(["verify", str(result.manifest_path)]) == 0

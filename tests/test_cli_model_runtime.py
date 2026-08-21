@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from voice_dataset_pipeline import cli
 from voice_dataset_pipeline import training as training_module
+from voice_dataset_pipeline.scenes import SceneName
 
 
 def test_model_register_parser_accepts_provider_python(tmp_path: Path) -> None:
@@ -27,6 +28,29 @@ def test_model_register_parser_accepts_provider_python(tmp_path: Path) -> None:
     )
 
     assert args.python == tmp_path / "provider-python.exe"
+
+
+def test_synthesize_parser_accepts_scene_batch_and_sox(tmp_path: Path) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "synthesize",
+            str(tmp_path),
+            "--text",
+            "测试",
+            "--output",
+            str(tmp_path / "voice.wav"),
+            "--scene",
+            "all",
+            "--mastering",
+            "sox",
+        ]
+    )
+
+    assert args.scene == "all"
+    assert args.mastering == "sox"
+    assert cli._scene_output(tmp_path / "voice.wav", SceneName.ASMR, multiple=True).name == (
+        "voice.asmr.wav"
+    )
 
 
 def test_train_auto_registration_records_provider_python(tmp_path: Path, monkeypatch) -> None:

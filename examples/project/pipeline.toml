@@ -114,15 +114,35 @@ timeout_seconds = 60.0
 preferred_min_seconds = 3.0
 preferred_max_seconds = 10.0
 
+# Optional: pin a reviewed manifest clip per emotion.
+# [reference.preferred_clip_ids]
+# neutral = "reviewed-clip-id"
+
+# Optional scene-specific pins override the emotion-only pin for that scene.
+# [reference.scene_preferred_clip_ids.asmr]
+# neutral = "reviewed-whisper-clip-id"
+
 [inference]
 default_model = ""
 device = "cuda"
 half = true
 language = "zh"
 seed = -1
+text_split_method = "cut0"
+fragment_interval = 0.3
+
+# Optional: tune only after comparing fixed text/reference/seed probes.
+# [inference.emotion_overrides.neutral]
+# top_k = 20
+# top_p = 0.96
+# temperature = 1.0
+# pace = 1.04
 
 [registry]
 path = "models/registry.json"
+
+[scenes]
+default = "speech"
 
 [postprocess]
 enabled = false
@@ -132,6 +152,11 @@ transpose = 0
 index_rate = 0.45
 rms_mix_rate = 0.25
 protect = 0.33
+
+[postprocess.sox]
+enabled = false
+binary = "sox"
+output_bits = 16
 
 [review]
 # TUI number keys follow this exact order: 1 = neutral, 2 = happy, ...

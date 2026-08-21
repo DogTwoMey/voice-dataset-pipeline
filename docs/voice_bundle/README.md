@@ -29,6 +29,7 @@ loader 还会核对文件白名单、相对路径、字节数和 SHA-256；目�
 
 - `examples/voice_bundle/selection.example.json`
 - `examples/voice_bundle/reference-profile.example.json`
+- `examples/voice_bundle/rendering-profile.example.json`（可选）
 - `examples/voice_bundle/rights-attestation.example.json`
 
 此外直接复用训练管线已经生成的：
@@ -57,6 +58,7 @@ uv run --frozen voice-bundle build `
   --display-name '角色语音 V2' `
   --selection 'D:\voice-evaluation\selection.json' `
   --reference-profile '.\examples\voice_bundle\reference-profile.example.json' `
+  --rendering-profile '.\examples\voice_bundle\rendering-profile.example.json' `
   --rights-attestation 'D:\private\rights-attestation.json' `
   --training-plan (Join-Path $run 'training-plan.json') `
   --training-result (Join-Path $run 'training-result.json') `
@@ -98,7 +100,34 @@ engine.model_version
 assets.gpt/sovits.{path,sha256,bytes}
 references.default
 references.items.<profile>.{description,auto_enabled,audio,prompt_text,prompt_lang,sha256,bytes}
+rendering.{scene_catalog,default_scene,supported_scenes,scene_reference_profiles,profile_sampling_overrides}  # 可选
 ```
 
 所有资产路径使用 `/` 分隔并相对于语音包根目录。`provenance`、`rights`、
 `distribution` 和 `files` 用于审计与完整性校验；插件可以读取，但不应允许用户配置覆盖这些字段。
+
+## 可选场景渲染契约
+
+`--rendering-profile` 接受一个与 manifest `rendering` 字段同形的严格 JSON 对象。省略该
+参数时，构建器不会写出 `rendering`，既有 v2 语音包的内容和默认语义不变。提供后，以下
+五个字段必须全部存在，未知字段会被拒绝：
+
+- `scene_catalog` 固定为 `vdp-scene-v1`；它标识由消费端实现的场景算法版本；
+- `default_scene` 必须属于非空、无重复的 `supported_scenes`；场景只允许
+  `speech/singing/audiobook/asmr/stage`；
+- `scene_reference_profiles.<scene>.<requested_profile> = <bundled_profile>` 将“场景”与
+  已有情绪/参考 profile 保持为两个维度；映射两端都必须存在于 `references.items`。未映射
+  的 profile 保持原 profile，由消费端最后回退到 `references.default`；
+- `profile_sampling_overrides.<bundled_profile>` 可写 `top_k/top_p/temperature/pace`
+  中的一至四项，不能是空对象或显式 `null`。它记录已经评估过的模型/profile 采样建议，
+  场景算法仍由 `scene_catalog` 决定；
+- `profile_sampling_overrides` 和 `scene_reference_profiles` 没有条目时仍应显式写 `{}`。
+
+该字段只描述可移植的推理意图和能力，不包含 SoX/RVC 可执行文件路径、启用开关或任意
+effects/argv。SoX 是否启用、二进制位置以及固定 preset 的具体参数属于消费端本机策略；
+严格模型会拒绝 `sox`、`binary`、`enabled`、`effects` 等额外字段。没有专用歌唱参考时，
+不要把 `singing` 列入 `supported_scenes`。
+
+仍只理解早期严格 v2 字段且设置 `extra=forbid` 的消费端会拒绝“带 rendering 的 v2”；应先
+升级消费端 loader，再启用 `--rendering-profile`。省略 rendering 的 v2 可继续按 `speech`
+默认场景、无 bundle 级采样覆盖处理。

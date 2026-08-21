@@ -204,6 +204,91 @@
       "title": "BundleReferences",
       "type": "object"
     },
+    "BundleRendering": {
+      "additionalProperties": false,
+      "description": "不包含本机执行细节的可移植场景渲染声明。",
+      "properties": {
+        "scene_catalog": {
+          "const": "vdp-scene-v1",
+          "title": "Scene Catalog",
+          "type": "string"
+        },
+        "default_scene": {
+          "enum": [
+            "speech",
+            "singing",
+            "audiobook",
+            "asmr",
+            "stage"
+          ],
+          "title": "Default Scene",
+          "type": "string"
+        },
+        "supported_scenes": {
+          "items": {
+            "enum": [
+              "speech",
+              "singing",
+              "audiobook",
+              "asmr",
+              "stage"
+            ],
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "title": "Supported Scenes",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scene_reference_profiles": {
+          "additionalProperties": {
+            "patternProperties": {
+              "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$": {
+                "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$",
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$"
+            },
+            "type": "object"
+          },
+          "propertyNames": {
+            "enum": [
+              "speech",
+              "singing",
+              "audiobook",
+              "asmr",
+              "stage"
+            ]
+          },
+          "title": "Scene Reference Profiles",
+          "type": "object"
+        },
+        "profile_sampling_overrides": {
+          "patternProperties": {
+            "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$": {
+              "$ref": "#/$defs/BundleSamplingOverride"
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$"
+          },
+          "title": "Profile Sampling Overrides",
+          "type": "object"
+        }
+      },
+      "required": [
+        "scene_catalog",
+        "default_scene",
+        "supported_scenes",
+        "scene_reference_profiles",
+        "profile_sampling_overrides"
+      ],
+      "title": "BundleRendering",
+      "type": "object"
+    },
     "BundleRights": {
       "additionalProperties": false,
       "properties": {
@@ -285,6 +370,60 @@
         "source_dataset_included"
       ],
       "title": "BundleRights",
+      "type": "object"
+    },
+    "BundleSamplingOverride": {
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "top_k"
+          ]
+        },
+        {
+          "required": [
+            "top_p"
+          ]
+        },
+        {
+          "required": [
+            "temperature"
+          ]
+        },
+        {
+          "required": [
+            "pace"
+          ]
+        }
+      ],
+      "description": "对单个参考 profile 的可移植 GPT-SoVITS 采样覆盖。",
+      "properties": {
+        "top_k": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "top_p": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Top P",
+          "type": "number"
+        },
+        "temperature": {
+          "exclusiveMinimum": 0,
+          "maximum": 2,
+          "title": "Temperature",
+          "type": "number"
+        },
+        "pace": {
+          "maximum": 2,
+          "minimum": 0.5,
+          "title": "Pace",
+          "type": "number"
+        }
+      },
+      "title": "BundleSamplingOverride",
       "type": "object"
     },
     "CodeProvenance": {
@@ -501,6 +640,10 @@
     "references": {
       "$ref": "#/$defs/BundleReferences"
     },
+    "rendering": {
+      "$ref": "#/$defs/BundleRendering",
+      "title": "Rendering"
+    },
     "provenance": {
       "$ref": "#/$defs/BundleProvenance"
     },
@@ -533,4 +676,3 @@
   "title": "VoiceBundleManifest",
   "type": "object"
 }
-

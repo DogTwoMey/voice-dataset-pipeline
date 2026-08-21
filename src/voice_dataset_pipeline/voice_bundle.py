@@ -22,6 +22,7 @@ from typing import Annotated, Any, Literal
 
 import soundfile as sf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _COMMIT_PATTERN = r"^[0-9a-f]{40}$"
@@ -39,6 +40,8 @@ _WINDOWS_RESERVED = {
 Sha256 = Annotated[str, Field(pattern=_SHA256_PATTERN)]
 GitCommit = Annotated[str, Field(pattern=_COMMIT_PATTERN)]
 PositiveBytes = Annotated[int, Field(gt=0)]
+BundleSceneName = Literal["speech", "singing", "audiobook", "asmr", "stage"]
+ProfileId = Annotated[str, Field(pattern=_PROFILE_ID_PATTERN)]
 
 
 class VoiceBundleError(ValueError):
@@ -138,6 +141,112 @@ class BundleReferences(_StrictModel):
         return self
 
 
+class BundleSamplingOverride(_StrictModel):
+    """对单个参考 profile 的可移植 GPT-SoVITS 采样覆盖。"""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        json_schema_extra={
+            "anyOf": [
+                {"required": ["top_k"]},
+                {"required": ["top_p"]},
+                {"required": ["temperature"]},
+                {"required": ["pace"]},
+            ]
+        },
+    )
+
+    top_k: Annotated[int, Field(ge=1, le=100)] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
+    top_p: Annotated[float, Field(gt=0, le=1)] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
+    temperature: Annotated[float, Field(gt=0, le=2)] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
+    pace: Annotated[float, Field(ge=0.5, le=2)] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
+
+    @field_validator("top_k", "top_p", "temperature", "pace", mode="before")
+    @classmethod
+    def reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("profile sampling override 字段不能显式设为 null")
+        return value
+
+    @model_validator(mode="after")
+    def require_value(self) -> BundleSamplingOverride:
+        if all(value is None for value in (self.top_k, self.top_p, self.temperature, self.pace)):
+            raise ValueError("profile sampling override 必须至少设置一个采样字段")
+        return self
+
+
+class BundleRendering(_StrictModel):
+    """不包含本机执行细节的可移植场景渲染声明。"""
+
+    scene_catalog: Literal["vdp-scene-v1"]
+    default_scene: BundleSceneName
+    supported_scenes: Annotated[
+        list[BundleSceneName],
+        Field(min_length=1, max_length=5, json_schema_extra={"uniqueItems": True}),
+    ]
+    scene_reference_profiles: dict[
+        BundleSceneName,
+        Annotated[
+            dict[ProfileId, ProfileId],
+            Field(json_schema_extra={"propertyNames": {"pattern": _PROFILE_ID_PATTERN}}),
+        ],
+    ]
+    profile_sampling_overrides: Annotated[
+        dict[ProfileId, BundleSamplingOverride],
+        Field(json_schema_extra={"propertyNames": {"pattern": _PROFILE_ID_PATTERN}}),
+    ]
+
+    @model_validator(mode="after")
+    def validate_rendering(self) -> BundleRendering:
+        if len(set(self.supported_scenes)) != len(self.supported_scenes):
+            raise ValueError("rendering.supported_scenes 不得包含重复场景")
+        if self.default_scene not in self.supported_scenes:
+            raise ValueError("rendering.default_scene 必须属于 supported_scenes")
+        unsupported = set(self.scene_reference_profiles) - set(self.supported_scenes)
+        if unsupported:
+            raise ValueError(
+                "rendering.scene_reference_profiles 包含未声明支持的场景: "
+                + ", ".join(sorted(unsupported))
+            )
+        for scene, mappings in self.scene_reference_profiles.items():
+            requested_names = {_profile_id(name).casefold() for name in mappings}
+            if len(requested_names) != len(mappings):
+                raise ValueError(f"场景 {scene} 的请求 profile ID 在 Windows 上发生大小写冲突")
+            for target in mappings.values():
+                _profile_id(target)
+        override_names = {_profile_id(name).casefold() for name in self.profile_sampling_overrides}
+        if len(override_names) != len(self.profile_sampling_overrides):
+            raise ValueError("profile sampling override ID 在 Windows 上发生大小写冲突")
+        return self
+
+
+def _validate_rendering_references(
+    rendering: BundleRendering,
+    profile_names: set[str],
+) -> None:
+    for scene, mappings in rendering.scene_reference_profiles.items():
+        for requested, target in mappings.items():
+            if requested not in profile_names:
+                raise ValueError(f"rendering 场景 {scene} 的请求 profile 不存在: {requested}")
+            if target not in profile_names:
+                raise ValueError(f"rendering 场景 {scene} 的目标 profile 不存在: {target}")
+    unknown_overrides = set(rendering.profile_sampling_overrides) - profile_names
+    if unknown_overrides:
+        raise ValueError(
+            "rendering.profile_sampling_overrides 包含未知 profile: "
+            + ", ".join(sorted(unknown_overrides))
+        )
+
+
 class CodeProvenance(_StrictModel):
     repository: Annotated[str, Field(min_length=1, max_length=500)]
     commit: GitCommit
@@ -207,13 +316,24 @@ class VoiceBundleManifest(_StrictModel):
     engine: BundleEngine
     assets: BundleAssets
     references: BundleReferences
+    rendering: BundleRendering | SkipJsonSchema[None] = Field(default_factory=lambda: None)
     provenance: BundleProvenance
     rights: BundleRights
     distribution: BundleDistribution
     files: list[BundleFile]
 
+    @field_validator("rendering", mode="before")
+    @classmethod
+    def reject_explicit_null_rendering(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("rendering 只能省略，不能显式设为 null")
+        return value
+
     @model_validator(mode="after")
     def validate_inventory(self) -> VoiceBundleManifest:
+        if self.rendering is not None:
+            _validate_rendering_references(self.rendering, set(self.references.items))
+
         declared_assets = [
             ("assets.gpt", self.assets.gpt.path, self.assets.gpt.sha256, self.assets.gpt.bytes),
             (
@@ -347,6 +467,7 @@ class BundleBuildRequest:
     training_plan_path: Path
     dataset_metadata_path: Path
     pipeline: CodeProvenance
+    rendering_profile_path: Path | None = None
     training_result_path: Path | None = None
     artifacts_path: Path | None = None
     provider_repository: str | None = None
@@ -656,8 +777,14 @@ def _copy_file(source: Path, destination: Path) -> BundleFile:
 
 
 def _write_manifest(path: Path, manifest: VoiceBundleManifest) -> None:
+    excluded = {"rendering"} if manifest.rendering is None else None
     path.write_text(
-        manifest.model_dump_json(indent=2) + "\n",
+        manifest.model_dump_json(
+            indent=2,
+            exclude=excluded,
+            exclude_none=manifest.rendering is not None,
+        )
+        + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -693,6 +820,19 @@ def build_voice_bundle(request: BundleBuildRequest) -> BundleBuildResult:
         "reference profile",
     )
     assert isinstance(references, ReferenceProfileDocument)
+    rendering: BundleRendering | None = None
+    if request.rendering_profile_path is not None:
+        parsed_rendering = _read_model(
+            request.rendering_profile_path,
+            BundleRendering,
+            "rendering profile",
+        )
+        assert isinstance(parsed_rendering, BundleRendering)
+        rendering = parsed_rendering
+        try:
+            _validate_rendering_references(rendering, set(references.items))
+        except ValueError as exc:
+            raise VoiceBundleError(str(exc)) from exc
     rights = _read_model(
         request.rights_attestation_path,
         RightsAttestation,
@@ -768,6 +908,7 @@ def build_voice_bundle(request: BundleBuildRequest) -> BundleBuildResult:
                 default=references.default,
                 items=bundled_references,
             ),
+            **({"rendering": rendering} if rendering is not None else {}),
             provenance=BundleProvenance(
                 provider=provider,
                 pipeline=request.pipeline,
@@ -881,6 +1022,11 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--display-name", required=True)
     build.add_argument("--selection", type=Path, required=True)
     build.add_argument("--reference-profile", type=Path, required=True)
+    build.add_argument(
+        "--rendering-profile",
+        type=Path,
+        help="可选；内嵌到 voice-bundle.json 的严格场景渲染声明",
+    )
     build.add_argument("--rights-attestation", type=Path, required=True)
     build.add_argument("--training-plan", type=Path, required=True)
     build.add_argument("--training-result", type=Path)
@@ -921,6 +1067,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=args.output,
                 selection_path=args.selection,
                 reference_profile_path=args.reference_profile,
+                rendering_profile_path=args.rendering_profile,
                 rights_attestation_path=args.rights_attestation,
                 training_plan_path=args.training_plan,
                 training_result_path=args.training_result,

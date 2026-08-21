@@ -199,6 +199,36 @@ voice-dataset train $workspace rvc --execute
 
 RVC 训练完成必须同时存在可推理的 `.pth` 权重；只有 `.index` 文件不代表模型已经可用于后处理。将 RVC 权重与索引登记到角色模型后，可通过 `synthesize --postprocess rvc` 转换；工具同时保留 `*.sovits.wav`，方便 A/B 检查吐字是否劣化。
 
+SoX/SoX_ng 是独立的最终母带阶段，顺序固定为
+`GPT-SoVITS -> 可选 RVC -> 可选 SoX`。内置 `speech`（默认）、`singing`、
+`audiobook`、`asmr`、`stage` 五种场景；场景不仅选择母带方案，也会调整真正传给
+GPT-SoVITS 的语速/采样参数并影响参考片段偏好：
+
+```powershell
+# 单一常规语音场景；auto 是否调用 SoX 由配置决定
+voice-dataset synthesize $workspace --text '你好。' --scene speech `
+  --mastering auto --output 'D:\output\voice.wav'
+
+# 同一文本、seed 和模型一次生成五种场景
+voice-dataset synthesize $workspace --text '你好。' --scene all `
+  --mastering sox --seed 2333 --output 'D:\output\voice.wav'
+```
+
+第二条命令生成 `voice.speech.wav`、`voice.singing.wav`、
+`voice.audiobook.wav`、`voice.asmr.wav`、`voice.stage.wav`。SoX 前的文件以
+`*.sovits.wav` 保存；若同时使用 RVC，还会保留 `*.rvc.wav`。`singing` 只表示歌唱素材
+偏好和保守母带，不会从普通文本自动生成旋律；真正歌唱需要演唱参考或独立 SVS provider。
+
+短台词合成默认使用 `[inference].text_split_method="cut0"`，让 GPT-SoVITS 在一次推理中
+自行学习标点停顿。不要对短句使用 `cut5`：它会在每个标点处分段，并在每段尾插入
+`fragment_interval` 静音，听起来像突然截断。长文本可显式改为 `cut2` 后再 A/B；人名中的
+`·` 会被上游中文规范器当成逗号，要求连读时应移除。
+
+固定 checkpoint 后，可用相同台词、参考音频和 seed 做 A/B，并将胜出的 `top_k`、
+`top_p`、`temperature`、`pace` 写入角色配置的
+`[inference.emotion_overrides.<emotion>]`。覆盖只作用于该角色的对应情绪，非法值会在启动
+上游推理前被拒绝；不要把某个角色的结果当成全局默认值。
+
 ## 配置
 
 配置按职责分离：
@@ -229,6 +259,8 @@ python .\scripts\generate_configs.py 'D:\voice-workspaces\character-a' --help
 | `training` | `enabled`：只有启用后，`--execute` 才获准执行 |
 | `training.gpt_sovits` | `repository`、`python`、`experiment_name`、`model_version`、`gpu`、两阶段的 batch/epoch/save 参数 |
 | `training.rvc` | `repository`、`python`、`experiment_name`、`version`、`sample_rate`、`gpu`、`workers`、`batch_size`、`epochs`、`save_every` |
+| `scenes` | `default`：缺省合成场景，默认 `speech` |
+| `postprocess.sox` | `enabled`、SoX/SoX_ng `binary`、`output_bits` |
 
 完整字段和默认值见示例 TOML；生成的 `training-plan.json` 会记录实际命令与指纹。
 

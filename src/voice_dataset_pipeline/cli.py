@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import secrets
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -43,6 +44,7 @@ from .models import (
     SplitBackend,
 )
 from .review import review_workspace
+from .scenes import SCENE_ORDER, SceneName, scene_profile
 from .splitting import EnergySplitter, materialize_clips
 from .workspace import Workspace
 
@@ -204,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     synthesize.add_argument("--reference-text")
     synthesize.add_argument("--emotion")
     synthesize.add_argument("--intensity", type=float, default=0.5)
+    synthesize.add_argument(
+        "--scene",
+        choices=[*(scene.value for scene in SCENE_ORDER), "all"],
+        help="合成场景；省略时使用配置默认值，all 会生成五种场景",
+    )
     synthesize.add_argument("--language")
     synthesize.add_argument("--seed", type=int)
     synthesize.add_argument(
@@ -211,6 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "rvc"],
         default="none",
         help="可选后处理；始终保留 .sovits.wav 原始输出",
+    )
+    synthesize.add_argument(
+        "--mastering",
+        choices=["auto", "none", "sox"],
+        default="auto",
+        help="SoX 母带处理；auto 读取 [postprocess.sox].enabled",
+    )
+    synthesize.add_argument(
+        "--mastering-profile",
+        choices=[scene.value for scene in SCENE_ORDER],
+        help="覆盖 scene 对应的 SoX profile；不能与 --scene all 同用",
     )
     synthesize.add_argument(
         "--secrets",
@@ -900,6 +918,9 @@ def _model(args: argparse.Namespace) -> int:
 
 
 def _synthesize(args: argparse.Namespace) -> int:
+    import soundfile as sf
+
+    from .postprocess import AudioArtifactPlan, RVCOptions, RVCPostprocessor, SoXMasterer
     from .synthesis import SynthesisService
 
     config = _load_for(args.workspace, args.config)
@@ -910,32 +931,35 @@ def _synthesize(args: argparse.Namespace) -> int:
         _emotion_analyzer(config, args.workspace, args.secrets),
         device=config.inference.device,
         half=config.inference.half,
+        text_split_method=config.inference.text_split_method,
+        fragment_interval=config.inference.fragment_interval,
         preferred_reference_min=config.reference.preferred_min_seconds,
         preferred_reference_max=config.reference.preferred_max_seconds,
+        preferred_reference_clip_ids=config.reference.preferred_clip_ids,
+        scene_reference_clip_ids=config.reference.scene_preferred_clip_ids,
+        emotion_overrides={
+            emotion: override.model_dump(exclude_none=True)
+            for emotion, override in config.inference.emotion_overrides.items()
+        },
     )
-    raw_output = args.output
-    if args.postprocess == "rvc":
-        raw_output = args.output.with_name(f"{args.output.stem}.sovits{args.output.suffix}")
-    result = service.synthesize(
-        args.text,
-        raw_output,
-        reference_audio=args.reference,
-        reference_text=args.reference_text,
-        emotion=args.emotion,
-        intensity=args.intensity,
-        language=args.language or config.inference.language,
-        seed=args.seed if args.seed is not None else config.inference.seed,
+    requested_scene = args.scene or config.scenes.default.value
+    scenes = SCENE_ORDER if requested_scene == "all" else (SceneName(requested_scene),)
+    if len(scenes) > 1 and args.mastering_profile:
+        raise ValueError("--mastering-profile cannot be combined with --scene all")
+    use_rvc = args.postprocess == "rvc"
+    use_sox = args.mastering == "sox" or (
+        args.mastering == "auto" and config.postprocess.sox.enabled
     )
-    print(f"输出: {result.output}")
-    print(f"采样率: {result.sample_rate}")
-    print(f"情绪: {result.emotion.emotion} ({result.emotion.intensity:.2f})")
-    print(f"参考: {result.reference.audio_path}")
-    if args.postprocess == "rvc":
-        from .postprocess import RVCOptions, RVCPostprocessor
+    seed = args.seed if args.seed is not None else config.inference.seed
+    if len(scenes) > 1 and seed < 0:
+        seed = secrets.randbelow(2**31 - 1)
+        print(f"多场景固定 seed: {seed}")
 
+    rvc_processor = None
+    if use_rvc:
         if model.vc_backend != "rvc":
             raise ValueError("当前模型未登记 RVC 后处理权重")
-        processor = RVCPostprocessor(
+        rvc_processor = RVCPostprocessor(
             repository=model.vc_repository,
             python=model.vc_python,
             model=model.vc_model,
@@ -954,10 +978,75 @@ def _synthesize(args: argparse.Namespace) -> int:
                 protect=config.postprocess.protect,
             ),
         )
-        final = processor.convert(result.output, args.output)
-        print(f"RVC 输出: {final}")
-        print(f"SoVITS 原始输出已保留: {result.output}")
+
+    multiple = len(scenes) > 1
+    plans = {
+        scene: AudioArtifactPlan.build(
+            _scene_output(args.output, scene, multiple=multiple),
+            use_rvc=use_rvc,
+            use_sox=use_sox,
+        )
+        for scene in scenes
+    }
+    masterers = {
+        scene: SoXMasterer(
+            binary=config.postprocess.sox.binary,
+            profile=args.mastering_profile or scene,
+            output_bits=config.postprocess.sox.output_bits,
+        )
+        for scene in scenes
+        if use_sox
+    }
+    for plan in plans.values():
+        plan.preflight()
+
+    shared_plan = None
+    if multiple:
+        shared_plan = service.resolve_emotion_plan(
+            args.text,
+            emotion=args.emotion,
+            intensity=args.intensity,
+        )
+
+    for scene in scenes:
+        plan = plans[scene]
+        result = service.synthesize(
+            args.text,
+            plan.sovits,
+            reference_audio=args.reference,
+            reference_text=args.reference_text,
+            emotion=args.emotion,
+            intensity=args.intensity,
+            scene=scene,
+            base_plan=shared_plan,
+            language=args.language or config.inference.language,
+            seed=seed,
+        )
+        current = result.output
+        if rvc_processor is not None:
+            assert plan.rvc is not None
+            current = rvc_processor.convert(current, plan.rvc)
+        if use_sox:
+            current = masterers[scene].process(current, plan.final)
+        print(f"场景: {scene.value}")
+        print(f"输出: {current}")
+        print(f"采样率: {sf.info(current).samplerate}")
+        print(f"情绪: {result.emotion.emotion} ({result.emotion.intensity:.2f})")
+        print(f"参考: {result.reference.audio_path}")
+        if scene == SceneName.SINGING and "scene-cluster:singing" not in result.reference.reason:
+            print(f"提示: {scene_profile(scene).capability_note}")
+        if plan.sovits != plan.final:
+            print(f"SoVITS 原始输出已保留: {plan.sovits}")
+        if plan.rvc is not None and plan.rvc != plan.final:
+            print(f"RVC 中间输出已保留: {plan.rvc}")
     return 0
+
+
+def _scene_output(output: str | Path, scene: SceneName, *, multiple: bool) -> Path:
+    destination = Path(output).expanduser().resolve()
+    if not multiple:
+        return destination
+    return destination.with_name(f"{destination.stem}.{scene.value}{destination.suffix}")
 
 
 def _status(args: argparse.Namespace) -> int:

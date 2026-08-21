@@ -13,6 +13,7 @@ from typing import Any
 from .emotion import EmotionPlan, TextEmotionAnalyzer
 from .references import ReferenceChoice, ReferenceSelector
 from .registry import VoiceModelRecord
+from .scenes import SceneName, apply_scene, scene_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,12 +22,21 @@ class SynthesisResult:
     sample_rate: int
     emotion: EmotionPlan
     reference: ReferenceChoice
+    scene: str = SceneName.SPEECH.value
 
 
 class GPTSoVITSRuntime:
     """Run upstream inference through the Python recorded with the model."""
 
-    def __init__(self, model: VoiceModelRecord, *, device: str = "cuda", half: bool = True) -> None:
+    def __init__(
+        self,
+        model: VoiceModelRecord,
+        *,
+        device: str = "cuda",
+        half: bool = True,
+        text_split_method: str = "cut0",
+        fragment_interval: float = 0.3,
+    ) -> None:
         if model.backend != "gpt-sovits":
             raise ValueError(f"unsupported synthesis backend: {model.backend}")
         if model.python is None:
@@ -42,6 +52,13 @@ class GPTSoVITSRuntime:
         self.sovits_weights = model.sovits_weights.expanduser().resolve()
         self.device = device
         self.half = half
+        allowed_split_methods = {"cut0", "cut1", "cut2", "cut3", "cut4", "cut5"}
+        if text_split_method not in allowed_split_methods:
+            raise ValueError(f"unsupported GPT-SoVITS text split method: {text_split_method}")
+        if not 0 <= fragment_interval <= 2:
+            raise ValueError("GPT-SoVITS fragment interval must be between 0 and 2 seconds")
+        self.text_split_method = text_split_method
+        self.fragment_interval = fragment_interval
         for label, path in (
             ("GPT-SoVITS repository", self.repository),
             ("GPT-SoVITS Python", self.python),
@@ -114,6 +131,8 @@ class GPTSoVITSRuntime:
             "temperature": plan.temperature,
             "pace": plan.pace,
             "seed": seed,
+            "text_split_method": self.text_split_method,
+            "fragment_interval": self.fragment_interval,
             "output": str(temporary),
         }
         try:
@@ -160,14 +179,36 @@ class SynthesisService:
         *,
         device: str = "cuda",
         half: bool = True,
+        text_split_method: str = "cut0",
+        fragment_interval: float = 0.3,
         preferred_reference_min: float = 3.0,
         preferred_reference_max: float = 10.0,
+        preferred_reference_clip_ids: dict[str, str] | None = None,
+        scene_reference_clip_ids: dict[str, dict[str, str]] | None = None,
+        emotion_overrides: dict[str, dict[str, float | int]] | None = None,
     ) -> None:
         self.model = model
         self.analyzer = analyzer
-        self.runtime = GPTSoVITSRuntime(model, device=device, half=half)
+        self.runtime = GPTSoVITSRuntime(
+            model,
+            device=device,
+            half=half,
+            text_split_method=text_split_method,
+            fragment_interval=fragment_interval,
+        )
         self.preferred_reference_min = preferred_reference_min
         self.preferred_reference_max = preferred_reference_max
+        self.preferred_reference_clip_ids = dict(preferred_reference_clip_ids or {})
+        self.scene_reference_clip_ids = {
+            scene.strip().lower(): dict(values)
+            for scene, values in (scene_reference_clip_ids or {}).items()
+            if scene.strip()
+        }
+        self.emotion_overrides = {
+            emotion.strip().lower(): dict(values)
+            for emotion, values in (emotion_overrides or {}).items()
+            if emotion.strip()
+        }
 
     def synthesize(
         self,
@@ -178,12 +219,15 @@ class SynthesisService:
         reference_text: str | None = None,
         emotion: str | None = None,
         intensity: float = 0.5,
+        scene: SceneName | str = SceneName.SPEECH,
+        base_plan: EmotionPlan | None = None,
         language: str = "zh",
         seed: int = -1,
     ) -> SynthesisResult:
-        from .emotion import plan_for
-
-        plan = plan_for(emotion, intensity=intensity) if emotion else self.analyzer.analyze(text)
+        scene_name = scene if isinstance(scene, SceneName) else SceneName(scene.strip().lower())
+        profile = scene_profile(scene_name)
+        plan = base_plan or self.resolve_emotion_plan(text, emotion=emotion, intensity=intensity)
+        plan = apply_scene(plan, scene_name)
         if reference_audio is not None:
             path = Path(reference_audio).expanduser().resolve()
             if not path.is_file():
@@ -193,10 +237,14 @@ class SynthesisService:
                 raise ValueError("--reference-text is required with an explicit reference audio")
             choice = ReferenceChoice(path, transcript, plan.emotion, float("inf"), "explicit")
         else:
+            preferred_clip_ids = dict(self.preferred_reference_clip_ids)
+            preferred_clip_ids.update(self.scene_reference_clip_ids.get(scene_name.value, {}))
             choice = ReferenceSelector(
                 self.model.reference_manifest,
                 preferred_min=self.preferred_reference_min,
                 preferred_max=self.preferred_reference_max,
+                preferred_clip_ids=preferred_clip_ids,
+                preferred_clusters=profile.preferred_clusters,
             ).select(plan)
         sample_rate, destination = self.runtime.synthesize(
             text=text,
@@ -206,4 +254,22 @@ class SynthesisService:
             text_language=language,
             seed=seed,
         )
-        return SynthesisResult(destination, sample_rate, plan, choice)
+        return SynthesisResult(destination, sample_rate, plan, choice, scene_name.value)
+
+    def resolve_emotion_plan(
+        self,
+        text: str,
+        *,
+        emotion: str | None = None,
+        intensity: float = 0.5,
+    ) -> EmotionPlan:
+        """Resolve a reusable pre-scene emotion plan exactly once."""
+        from .emotion import plan_for
+
+        plan = plan_for(emotion, intensity=intensity) if emotion else self.analyzer.analyze(text)
+        override = self.emotion_overrides.get(plan.emotion.strip().lower())
+        if override:
+            values = plan.model_dump()
+            values.update(override)
+            plan = EmotionPlan.model_validate(values)
+        return plan
